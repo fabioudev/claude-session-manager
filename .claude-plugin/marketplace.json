@@ -1,0 +1,20 @@
+{
+  "name": "claude-session-manager",
+  "description": "Plugins for the Claude Session Manager: a local board and coordination layer for parallel Claude Code sessions.",
+  "owner": {
+    "name": "Fabio Mende",
+    "url": "https://github.com/fabioudev"
+  },
+  "plugins": [
+    {
+      "name": "csm",
+      "description": "Report session status to the local board, answer AskUserQuestion prompts in the browser, and coordinate with other Claude Code sessions through messages and file claims.",
+      "version": "0.1.0",
+      "source": "./plugin",
+      "author": {
+        "name": "Fabio Mende",
+        "url": "https://github.com/fabioudev"
+      }
+    }
+  ]
+}

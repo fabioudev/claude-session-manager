@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>Session board</title>
+  <rect width="32" height="32" rx="7" fill="#0b0d0c" />
+  <path d="M8 10h10M8 16h16M8 22h7" stroke="#edf1ed" stroke-width="2" stroke-linecap="round" />
+  <circle cx="23" cy="10" r="2.4" fill="#e9a23b" />
+</svg>

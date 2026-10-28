@@ -1,0 +1,275 @@
+.sheet {
+  width: min(600px, calc(100vw - 32px));
+  max-height: min(84svh, 820px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.sheet[open] {
+  display: flex;
+  flex-direction: column;
+  animation: sheet-in var(--dur-slow) var(--ease);
+}
+
+.sheet-form {
+  display: contents;
+}
+
+.sheet::backdrop {
+  background: var(--overlay);
+  backdrop-filter: blur(3px);
+}
+
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.sheet-kicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sheet-kicker .dot {
+  width: 6px;
+  height: 6px;
+}
+
+.sheet-title {
+  margin-top: 5px;
+  font-size: 17px;
+  font-weight: 570;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+
+.sheet-sub {
+  margin-top: 4px;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.sheet-body {
+  flex: 1;
+  min-height: 0;
+  padding: 22px 24px;
+  overflow-y: auto;
+}
+
+.sheet-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.sheet-foot .grow {
+  flex: 1;
+}
+
+.sheet-foot-note {
+  color: var(--ink-3);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.sheet-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---------- question form ---------- */
+
+.prompt-block + .prompt-block {
+  margin-top: 24px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+
+.prompt-label {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.prompt-index {
+  margin-left: auto;
+  color: var(--ink-3);
+}
+
+.prompt-question {
+  margin-top: 6px;
+  font-size: 16px;
+  font-weight: 540;
+  line-height: 1.35;
+  letter-spacing: -0.015em;
+  text-wrap: pretty;
+}
+
+.prompt-multi {
+  margin-top: 4px;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.option {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+
+.option:hover {
+  border-color: var(--line-strong);
+  background: var(--raised);
+}
+
+.option:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--line-strong));
+  background: var(--accent-soft);
+}
+
+.option input {
+  width: 15px;
+  height: 15px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.option-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 520;
+  line-height: 1.35;
+}
+
+.option-description {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-2);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.other-field {
+  margin-top: 9px;
+}
+
+.other-field .input {
+  min-height: 34px;
+  font-size: 12.5px;
+}
+
+.question-error {
+  margin-top: 14px;
+}
+
+.sheet-body .empty {
+  padding: 12px 0;
+  border: 0;
+}
+
+@media (max-width: 620px) {
+  .sheet {
+    width: 100%;
+    max-height: 92svh;
+    margin: auto 0 0;
+    border-width: 1px 0 0;
+    border-radius: 12px 12px 0 0;
+  }
+
+  .sheet-head,
+  .sheet-body,
+  .sheet-foot {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .sheet-foot {
+    flex-wrap: wrap;
+  }
+
+  .sheet-foot .grow {
+    display: none;
+  }
+
+  .sheet-foot-note {
+    order: 3;
+    width: 100%;
+  }
+}
+
+/* ---------- launch form ---------- */
+
+.launch-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.launch-grid .span-2 {
+  grid-column: 1 / -1;
+}
+
+.launch-note {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+@media (max-width: 520px) {
+  .launch-grid {
+    grid-template-columns: 1fr;
+  }
+}

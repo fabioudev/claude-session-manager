@@ -1,0 +1,18 @@
+services:
+  csm:
+    build: .
+    image: ghcr.io/fabioudev/claude-session-manager:latest
+    container_name: claude-session-manager
+    environment:
+      CSM_TOKEN: ${CSM_TOKEN:?Set CSM_TOKEN in .env — see .env.example}
+    ports:
+      - "127.0.0.1:4747:4747"
+    volumes:
+      # Claude Code transcripts and registry, read-only.
+      - "${HOME}/.claude:/claude:ro"
+      # Settings, messages and claims survive container rebuilds.
+      - csm-data:/data
+    restart: unless-stopped
+
+volumes:
+  csm-data:
