@@ -133,6 +133,11 @@ Two modes are available in **Settings → Where sessions ask questions**:
 
 The browser never executes tools. It only delivers the answer text.
 
+Settings also hold the wait timeout, the launch toggle and the appearance choice, and show the
+daemon's paths, version and write state:
+
+![Settings](docs/screenshots/settings.png)
+
 ## Coordination
 
 ![Messages, claims and shared files](docs/screenshots/coordination.png)
