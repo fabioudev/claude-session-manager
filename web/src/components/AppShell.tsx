@@ -1,8 +1,9 @@
 import { LayoutGrid, MessagesSquare, Settings2, WifiOff } from 'lucide-react'
 import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { activeCount, boardBuckets } from '../lib/board'
 import { relativeTime } from '../lib/format'
-import { useLive } from '../lib/live'
+import { type ConnectionState, useLive } from '../lib/live'
 import { BrandLockup } from './Brand'
 import { ThemeToggle } from './ThemeToggle'
 
@@ -10,14 +11,21 @@ function navClass({ isActive }: { isActive: boolean }): string {
   return isActive ? 'nav-link active' : 'nav-link'
 }
 
-function connectionLabel(state: 'connecting' | 'live' | 'offline'): string {
+function connectionLabel(state: ConnectionState): string {
   if (state === 'live') return 'Live'
+  if (state === 'polling') return 'Polling'
   if (state === 'offline') return 'Daemon offline'
   return 'Connecting'
 }
 
+function connectionDot(state: ConnectionState): string {
+  if (state === 'live' || state === 'polling') return 'dot-live'
+  if (state === 'offline') return 'dot-offline'
+  return 'dot-idle'
+}
+
 export function AppShell() {
-  const { sessions, questions, config, connection, lastEventAt, reconnect, ready } = useLive()
+  const { sessions, config, connection, lastEventAt, reconnect, ready } = useLive()
   const location = useLocation()
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: navigating to another route is the whole point of this effect.
@@ -25,8 +33,10 @@ export function AppShell() {
     window.scrollTo({ top: 0, behavior: 'auto' })
   }, [location.pathname])
 
-  const active = sessions.filter((session) => !session.archived && session.status !== 'ended')
-  const needs = questions.length
+  const buckets = boardBuckets(sessions)
+  const needs = buckets.needs.length
+  const active = activeCount(buckets)
+  const boardBadge = needs > 0 ? needs : active
   const unread = sessions.reduce((sum, session) => sum + session.unreadMessages, 0)
   const offline = ready && connection === 'offline'
 
@@ -37,8 +47,15 @@ export function AppShell() {
           <NavLink to="/" end className={navClass}>
             <LayoutGrid className="nav-icon" size={15} aria-hidden="true" />
             <span>Board</span>
-            <span className={needs > 0 ? 'nav-count needs' : 'nav-count'}>
-              {active.length > 0 ? active.length : ''}
+            <span
+              className={needs > 0 ? 'nav-count needs' : 'nav-count'}
+              title={
+                needs > 0
+                  ? `${needs} session${needs === 1 ? '' : 's'} need you`
+                  : `${active} active`
+              }
+            >
+              {boardBadge > 0 ? boardBadge : ''}
             </span>
           </NavLink>
         </li>
@@ -73,10 +90,7 @@ export function AppShell() {
           {nav}
           <div className="rail-foot">
             <div className="rail-status">
-              <span
-                className={`dot ${connection === 'live' ? 'dot-live' : connection === 'offline' ? 'dot-offline' : 'dot-idle'}`}
-                aria-hidden="true"
-              />
+              <span className={`dot ${connectionDot(connection)}`} aria-hidden="true" />
               <span>{connectionLabel(connection)}</span>
               {lastEventAt > 0 ? (
                 <span className="rail-meta" style={{ marginLeft: 'auto' }}>
@@ -109,10 +123,7 @@ export function AppShell() {
           <div className="mobile-bar-top">
             <BrandLockup needs={needs > 0} />
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span
-                className={`dot ${connection === 'live' ? 'dot-live' : connection === 'offline' ? 'dot-offline' : 'dot-idle'}`}
-                aria-hidden="true"
-              />
+              <span className={`dot ${connectionDot(connection)}`} aria-hidden="true" />
               <ThemeToggle />
             </div>
           </div>

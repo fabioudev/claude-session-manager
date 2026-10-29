@@ -17,6 +17,7 @@ import {
   Copy,
   CornerDownRight,
   FileCode2,
+  Folder,
   GitBranch,
   type LucideIcon,
   MessageSquare,
@@ -42,6 +43,7 @@ import {
   formatCost,
   formatModel,
   relativeTime,
+  repeatsMission,
   repoLabel,
   shortDuration,
 } from '../lib/format'
@@ -154,7 +156,7 @@ function repoHref(remote: string | null): string | null {
 
 function sessionName(sessions: SessionSummary[], id: string): string {
   const session = sessions.find((candidate) => candidate.id === id)
-  return session?.title || id.slice(0, 8)
+  return session?.mission || session?.title || id.slice(0, 8)
 }
 
 export function SessionPage() {
@@ -351,11 +353,17 @@ export function SessionPage() {
   const claims = detail?.claims ?? []
   const todosDone = session.todos.filter((todo) => todo.status === 'completed').length
   const remote = repoHref(session.gitRemoteUrl)
+  const repo = repoLabel(session)
+  const sameProject =
+    Boolean(session.project) && repo.toLowerCase() === session.project?.toLowerCase()
+  const repoText = [sameProject ? null : repo, session.gitBranch].filter(Boolean).join(' / ')
   const terminal = session.tmux ? `tmux ${session.tmux}` : session.pid ? `pid ${session.pid}` : null
   const traceStart = timeline.end - 30 * timeline.bucketMs
   const readOnly = Boolean(config?.readOnly)
   const taskText = session.task || session.statusDetail
   const taskLong = taskText.length > 700
+  const missionText = session.mission || session.title
+  const taskRepeatsMission = repeatsMission(taskText, missionText)
 
   return (
     <>
@@ -402,9 +410,10 @@ export function SessionPage() {
                 </div>
               </form>
             ) : (
-              <h1>{session.title}</h1>
+              <h1>{missionText}</h1>
             )}
             <p className={taskLong && !taskExpanded ? 'detail-task is-clamped' : 'detail-task'}>
+              {taskRepeatsMission ? null : <span className="detail-task-label">Latest prompt</span>}
               {taskText}
             </p>
             {taskLong ? (
@@ -418,17 +427,24 @@ export function SessionPage() {
               </button>
             ) : null}
             <div className="detail-meta">
-              <span className="meta-item">
-                <GitBranch size={11} aria-hidden="true" />
-                {remote ? (
-                  <a href={remote} target="_blank" rel="noreferrer">
-                    {repoLabel(session)}
-                  </a>
-                ) : (
-                  repoLabel(session)
-                )}
-                {session.gitBranch ? ` / ${session.gitBranch}` : ''}
-              </span>
+              {session.project ? (
+                <span className="meta-item meta-project">
+                  <Folder size={11} aria-hidden="true" />
+                  {session.project}
+                </span>
+              ) : null}
+              {repoText ? (
+                <span className="meta-item">
+                  <GitBranch size={11} aria-hidden="true" />
+                  {remote && !sameProject ? (
+                    <a href={remote} target="_blank" rel="noreferrer">
+                      {repoText}
+                    </a>
+                  ) : (
+                    repoText
+                  )}
+                </span>
+              ) : null}
               {session.startedAt ? (
                 <span className="meta-item">started {dateTime(session.startedAt)}</span>
               ) : null}
@@ -479,7 +495,7 @@ export function SessionPage() {
               title="Rename session"
               aria-label="Rename session"
               onClick={() => {
-                setTitleDraft(session.title)
+                setTitleDraft(session.titleSource === 'custom' ? session.title : missionText)
                 setEditing(true)
               }}
             >
@@ -626,7 +642,7 @@ export function SessionPage() {
                   <Copy size={10} aria-hidden="true" />
                 </button>
               </Fact>
-              <Fact label="Project" mono>
+              <Fact label="Working dir" mono>
                 <button
                   type="button"
                   className="copy-line"
@@ -787,8 +803,8 @@ export function SessionPage() {
                   className="textarea"
                   value={messageDraft}
                   onChange={(event) => setMessageDraft(event.target.value)}
-                  placeholder={`Message ${session.title}`}
-                  aria-label={`Message ${session.title}`}
+                  placeholder={`Message ${missionText}`}
+                  aria-label={`Message ${missionText}`}
                   maxLength={8000}
                 />
                 <div className="composer-foot">
@@ -822,7 +838,7 @@ export function SessionPage() {
 
       {confirmStop ? (
         <ConfirmDialog
-          title={`Stop “${session.title}”?`}
+          title={`Stop “${missionText}”?`}
           description="The background job receives a stop signal. Work in progress may be left unfinished."
           confirmLabel="Stop session"
           danger

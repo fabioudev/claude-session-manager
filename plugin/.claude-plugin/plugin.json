@@ -1,6 +1,6 @@
 {
   "name": "csm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Live board and coordination tools for parallel Claude Code sessions: report work in progress, answer AskUserQuestion from the browser, and message the other sessions on this machine.",
   "author": {
     "name": "Fabio Mende",

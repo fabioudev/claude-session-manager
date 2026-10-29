@@ -905,8 +905,9 @@
 
   .hero-aside {
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 16px;
+    gap: 6px 16px;
     padding-top: 0;
     text-align: left;
   }

@@ -31,6 +31,19 @@ export function clockTime(at: number, seconds = false): string {
   }).format(at)
 }
 
+/** Clock time for today, calendar day plus time for anything older. */
+export function dayTime(at: number | null | undefined, now = Date.now()): string {
+  if (!at) return 'never'
+  if (new Date(at).toDateString() === new Date(now).toDateString()) return clockTime(at)
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(at)
+}
+
 export function dateTime(at: number): string {
   return new Intl.DateTimeFormat(undefined, {
     month: 'short',
@@ -65,8 +78,8 @@ export function countdown(ms: number): string {
 
 export const STATUS_LABEL: Record<SessionStatus, string> = {
   working: 'Working',
-  waiting: 'Waiting',
-  idle: 'Idle',
+  waiting: 'Needs you',
+  idle: 'Finished',
   ended: 'Ended',
   unknown: 'No signal',
 }
@@ -131,12 +144,89 @@ export function sessionLabel(session: SessionSummary): string {
 }
 
 export function isNeedsYou(session: SessionSummary): boolean {
-  return session.status === 'waiting' || Boolean(session.question)
+  return session.status === 'waiting'
+}
+
+/** Repository links are often pasted before the actual request. */
+function withoutLeadLinks(text: string): string {
+  return text.replace(/^(?:(?:https?:\/\/|www\.)\S+\s*)+/i, '').trim()
 }
 
 export function taskPreview(session: SessionSummary): string {
-  const value = session.task || session.statusDetail || ''
-  return value.replace(/\s+/g, ' ').trim()
+  const value = withoutLeadLinks((session.task ?? '').replace(/\s+/g, ' '))
+  return value.length > 240 ? `${value.slice(0, 239)}…` : value
+}
+
+/** Comparable form of a prompt or headline: one line, no final punctuation. */
+function comparable(text: string): string {
+  return withoutLeadLinks(text)
+    .replace(/\s+/g, ' ')
+    .replace(/[.!?]+$/, '')
+    .trim()
+    .toLowerCase()
+}
+
+/**
+ * True when a prompt line just repeats the mission headline — the full first
+ * prompt compared against its truncated headline, ignoring final punctuation
+ * and a repository link pasted in front of the request.
+ */
+export function repeatsMission(context: string, mission: string): boolean {
+  const left = comparable(context)
+  const right = comparable(mission)
+  if (left === right) return true
+  return right.endsWith('…') && left.startsWith(right.slice(0, -1))
+}
+
+/**
+ * True when a prompt starts with the mission and only adds to it. Reserved for
+ * "latest ask" lines: an assistant reply that opens by restating the task is
+ * still a reply, so it uses `repeatsMission` instead.
+ */
+export function restatesMission(prompt: string, mission: string): boolean {
+  if (repeatsMission(prompt, mission)) return true
+  const left = comparable(prompt)
+  const right = comparable(mission).replace(/…$/, '')
+  if (right.length < 12 || !left.startsWith(right)) return false
+  return /^[\s.,;:!?—–-]?$/.test(left.charAt(right.length))
+}
+
+/**
+ * The last assistant reply on a finished turn, cleaned for a one-line preview.
+ * Empty when the activity is not a real reply or still repeats the generic
+ * "ready" placeholder.
+ */
+export function idleResponsePreview(session: SessionSummary): string {
+  if (session.status !== 'idle' || session.activity?.kind !== 'response') return ''
+  const value = session.activity.text.replace(/\s+/g, ' ').replace(/[*`]/g, '').trim()
+  return value === 'Ready for the next prompt' ? '' : value
+}
+
+/**
+ * One sentence that answers "what is this session doing right now, and does
+ * it need me?" — distinct from the task, which is what the user originally
+ * asked.
+ */
+export function sessionStateLine(session: SessionSummary): string {
+  if (session.status === 'waiting') {
+    return session.statusDetail || 'Waiting for you'
+  }
+  if (session.status === 'working') {
+    return session.statusDetail || 'Working'
+  }
+  if (session.status === 'idle') {
+    // `live` is false for a session that only reported a Stop hook. The
+    // freshest signal, not the process registry, decides how certain we are.
+    if (session.source === 'transcript') return 'Likely finished — no live signal'
+    if (session.kind === 'background') return 'Background session is idle'
+    return 'Ready for your next prompt'
+  }
+  if (session.status === 'ended') {
+    const detail = session.statusDetail
+    if (detail && detail !== 'Session closed') return detail
+    return session.source === 'transcript' ? 'History — no live signal' : 'Session ended'
+  }
+  return session.statusDetail || 'No live signal yet'
 }
 
 export function percent(value: number | null | undefined): string {

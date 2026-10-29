@@ -11,7 +11,13 @@ import {
   type TokenTotals,
   type TranscriptParseState,
 } from './parse.js'
-import { readInitialTranscript, readSlice, splitBufferLines, statTranscript } from './reader.js'
+import {
+  readInitialTranscript,
+  readSlice,
+  scanLines,
+  splitBufferLines,
+  statTranscript,
+} from './reader.js'
 
 export interface TranscriptView {
   sessionId: string
@@ -295,7 +301,15 @@ export class TranscriptStore {
     const tailBytes = eager ? 1_048_576 : 262_144
     const read = await readInitialTranscript(entry.file, info, { headBytes, tailBytes })
     const state = createTranscriptState()
-    const resolved = parseTranscriptLines(state, read.lines)
+    const headLines = read.lines.slice(0, read.headLineCount)
+    const resolved = parseTranscriptLines(state, headLines)
+    if (read.headLineCount < read.lines.length && !state.firstPrompt) {
+      // The head held only slash commands or similar; the original ask may sit
+      // between the head and the tail. Look ahead before the tail parser makes
+      // the first *recent* prompt look like the session's mission.
+      await this.fillFirstPrompt(entry.file, info.size, read.headEnd, state)
+    }
+    resolved.push(...parseTranscriptLines(state, read.lines.slice(read.headLineCount)))
     entry.state = state
     entry.offset = read.offset
     entry.remainder = read.remainder
@@ -307,6 +321,27 @@ export class TranscriptStore {
     if (resolved.length) entry.resolvedQuestions.push(...resolved)
     this.evictIfNeeded()
     this.onUpdate?.(entry.sessionId)
+  }
+
+  /**
+   * Find the session's first real prompt when the head window did not contain it.
+   * The probe state is thrown away; only the prompt itself is carried over.
+   */
+  private async fillFirstPrompt(
+    file: string,
+    size: number,
+    from: number,
+    state: TranscriptParseState,
+  ): Promise<void> {
+    const probe = createTranscriptState()
+    const found = await scanLines(file, from, size, (lines) => {
+      parseTranscriptLines(probe, lines)
+      return probe.firstPrompt !== null
+    })
+    if (found) {
+      state.firstPrompt = probe.firstPrompt
+      state.firstPromptAt = probe.firstPromptAt
+    }
   }
 
   private async refresh(entry: Entry): Promise<void> {

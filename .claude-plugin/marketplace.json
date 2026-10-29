@@ -9,7 +9,7 @@
     {
       "name": "csm",
       "description": "Report session status to the local board, answer AskUserQuestion prompts in the browser, and coordinate with other Claude Code sessions through messages and file claims.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "source": "./plugin",
       "author": {
         "name": "Fabio Mende",

@@ -40,6 +40,15 @@
   white-space: pre-wrap;
 }
 
+.detail-task-label {
+  margin-right: 8px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+}
+
 .detail-task.is-clamped {
   display: -webkit-box;
   -webkit-box-orient: vertical;

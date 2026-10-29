@@ -6,9 +6,10 @@
 
 A self-hosted web control plane for Claude Code sessions running on one machine.
 
-The board shows what every session is working on, which repository and branch it is in, and
-whether it is working, waiting or finished. When a session asks a question, the question appears
-on the board and you can answer it from the browser — the terminal does not need focus.
+The board shows what every session is working on, which project it belongs to, which repository
+and branch it is in, and whether it is working, waiting or finished. When a session asks a
+question, the question appears on the board and you can answer it from the browser — the terminal
+does not need focus.
 
 A Claude Code plugin connects the sessions. It reports their lifecycle and tool activity, and it
 teaches each session that the other sessions exist, so they can message each other, warn about
@@ -21,8 +22,8 @@ overlapping edits and review each other's changes before overwriting them.
 
 ## What you get
 
-- **Live board** — status, current task, repository, branch and a 30-minute signal trace for every
-  session, including background jobs and finished sessions.
+- **Live board** — a one-line mission headline, current step, status, project, repository, branch
+  and a 30-minute signal trace for every session, including background jobs and finished sessions.
 - **Questions in the browser** — `AskUserQuestion` prompts are held by a hook and answered from the
   board. Option descriptions, multiple questions and free-form answers are supported.
 - **Session detail** — activity ledger, todos, token usage, context percentage, file claims,
@@ -147,15 +148,15 @@ their names and tasks, use the `csm` MCP tools, check `shared_changes` before ed
 before risky edits. On every prompt it appends a compact digest of unread messages, files touched
 by more than one session and active claims.
 
-| MCP tool         | Purpose                                                   |
-| ---------------- | --------------------------------------------------------- |
-| `list_sessions`  | Every session: status, repository, task, pending question |
-| `get_session`    | One session: todos, recent activity, unread messages      |
-| `send_message`   | Message one session or broadcast to all                   |
-| `read_inbox`     | Read and clear this session's messages                    |
-| `shared_changes` | Recently changed files, overlaps and claims               |
-| `claim_files`    | Announce files this session is about to edit              |
-| `release_files`  | Release claims                                            |
+| MCP tool         | Purpose                                                            |
+| ---------------- | ------------------------------------------------------------------ |
+| `list_sessions`  | Every session: status, project, repository, task, pending question |
+| `get_session`    | One session: todos, recent activity, unread messages               |
+| `send_message`   | Message one session or broadcast to all                            |
+| `read_inbox`     | Read and clear this session's messages                             |
+| `shared_changes` | Recently changed files, overlaps and claims                        |
+| `claim_files`    | Announce files this session is about to edit                       |
+| `release_files`  | Release claims                                                     |
 
 Messages are delivered on the recipient's next prompt or through `read_inbox`. Claims expire
 automatically. When two sessions edit the same file within a two-hour window, the board marks an
@@ -181,10 +182,19 @@ Useful commands inside a session:
 | `idle`    | The turn finished; the session is ready for the next prompt           |
 | `ended`   | The process is gone, the job finished, or the transcript is stale     |
 
-The board groups sessions into Active, Waiting, Working, Idle, Ended and Archived. You can rename,
-pin and archive sessions. **New session** starts `claude --bg` in a directory you choose when
-launching is enabled in Settings; background jobs can be stopped from the board. Interactive
-sessions must be closed in their terminal.
+The board opens on **Overview**, which puts your turn first: _Needs you now_, _Finished and
+awaiting your next prompt_, _Working now_ and _No live signal_. Every row leads with a one-line
+mission headline derived from the session's first prompt, so the board answers "what is this
+session doing?" before you open it; when a transcript starts with a Claude Code compaction summary,
+the headline is taken from the original request inside it. The meta line names the project — the
+top-level workspace folder under your home directory — so a sub-repo, package or worktree still
+reports the workspace it belongs to, followed by the repository and branch. Renaming a session
+replaces the generated headline. The tabs narrow the list to Needs you, Working, Finished, Ended or Archived. A
+finished row carries a green **Finished** badge, the last reply (or the original task when there is
+no reply), the exact time the turn finished and how long it has been waiting, so you can tell at a
+glance which session concluded and which is still running. **New session** starts `claude --bg` in
+a directory you choose when launching is enabled in Settings; background jobs can be stopped from
+the board. Interactive sessions must be closed in their terminal.
 
 The same board on a phone:
 
@@ -225,7 +235,8 @@ csm --host 0.0.0.0 --token "$(openssl rand -hex 24)" --open
 Open `http://<host>:4747/?token=<token>` once. The UI keeps the token in `localStorage` and strips
 it from the address bar. Put an HTTPS reverse proxy in front of the daemon for anything beyond a
 trusted network; the token travels as a bearer header, except in the one-time link and the SSE
-stream.
+stream. If the proxy buffers SSE (some tunnels do), the board notices the silent stream and keeps
+itself current with a five-second polling fallback.
 
 ## HTTP API
 

@@ -6,11 +6,12 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react'
 import { ApiError, api, eventSourceUrl } from '../api'
 
-export type ConnectionState = 'connecting' | 'live' | 'offline'
+export type ConnectionState = 'connecting' | 'live' | 'polling' | 'offline'
 
 interface LiveContextValue {
   sessions: SessionSummary[]
@@ -61,6 +62,8 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const [lastEventAt, setLastEventAt] = useState(0)
   const [messageTick, setMessageTick] = useState(0)
   const [nonce, setNonce] = useState(0)
+  const [fastPoll, setFastPoll] = useState(false)
+  const fallbackRef = useRef(false)
 
   const connect = useCallback(async (): Promise<boolean> => {
     setBootError(null)
@@ -99,6 +102,10 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       setConfig(nextConfig)
       setUnauthorized(false)
       setError(null)
+      if (fallbackRef.current) {
+        setLastEventAt(Date.now())
+        setConnection((state) => (state === 'offline' ? 'polling' : state))
+      }
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) {
         setUnauthorized(true)
@@ -127,6 +134,22 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!ready || unauthorized) return
     let source: EventSource
+    let watchdog: number | undefined
+    let degraded = false
+
+    const degrade = () => {
+      if (degraded) return
+      degraded = true
+      fallbackRef.current = true
+      setFastPoll(true)
+      setConnection('polling')
+    }
+
+    const armWatchdog = (delay: number) => {
+      window.clearTimeout(watchdog)
+      watchdog = window.setTimeout(degrade, delay)
+    }
+
     try {
       source = new EventSource(eventSourceUrl())
     } catch {
@@ -134,10 +157,19 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       return
     }
 
+    // Also cover proxies that never complete the stream handshake at all.
+    armWatchdog(5_000)
+
     source.onopen = () => {
-      setConnection('live')
       setError(null)
-      setLastEventAt(Date.now())
+      // Reverse proxies (e.g. a Cloudflare tunnel) can open the stream and
+      // then buffer its body. The daemon sends `hello` immediately, so treat
+      // a silent connection as degraded and keep the board fresh by polling.
+      degraded = false
+      fallbackRef.current = false
+      setFastPoll(false)
+      setConnection('connecting')
+      armWatchdog(5_000)
     }
     source.onerror = () => {
       setConnection('offline')
@@ -151,12 +183,17 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       } catch {
         return
       }
-      setLastEventAt(Date.now())
+      if (!degraded) {
+        setLastEventAt(Date.now())
+        setConnection('live')
+        // The server pings every 20 seconds; longer silence means the stream
+        // is no longer delivering and polling has to take over.
+        armWatchdog(25_000)
+      }
       if (type === 'hello' && payload.type === 'hello') {
         setSessions(payload.sessions)
         setQuestions(payload.questions)
         setConfig(payload.config)
-        setConnection('live')
         return
       }
       if (payload.type === 'session') {
@@ -208,6 +245,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     })
 
     return () => {
+      window.clearTimeout(watchdog)
       for (const [type, listener] of listeners) source.removeEventListener(type, listener)
       source.close()
     }
@@ -215,7 +253,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!ready) return
-    const timer = window.setInterval(() => void refresh(), 30_000)
+    const timer = window.setInterval(() => void refresh(), fastPoll ? 5_000 : 30_000)
     const onVisibility = () => {
       if (document.visibilityState === 'visible') void refresh()
     }
@@ -224,7 +262,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [ready, refresh])
+  }, [ready, fastPoll, refresh])
 
   const reconnect = useCallback(() => {
     setConnection('connecting')

@@ -39,8 +39,10 @@ import {
   getGitInfo,
   hashString,
   isoAt,
+  missionHeadline,
   now,
   oneLine,
+  projectLabel,
   shortId,
   truncate,
 } from './util.js'
@@ -1018,6 +1020,7 @@ export class SessionManager {
     const meta = this.store.getSessionMeta(id)
     const projectPath = runtime?.cwd ?? view?.cwd ?? live?.cwd ?? job?.cwd ?? ''
     const projectName = projectPath ? path.basename(projectPath) : 'unknown'
+    const project = projectLabel(projectPath)
     const hookFresh = runtime ? at - runtime.lastHookAt < LIVE_HOOK_WINDOW_MS : false
     const lastActivityAt = Math.max(
       view?.lastActivityAt ?? 0,
@@ -1089,6 +1092,7 @@ export class SessionManager {
         : null
 
     const titleCandidate = this.pickTitle(id, view, live, job, meta?.customTitle ?? null)
+    const mission = this.sessionMission(id, view, live, job, meta?.customTitle ?? null)
     const task =
       runtime?.prompt ??
       view?.lastPrompt ??
@@ -1121,11 +1125,16 @@ export class SessionManager {
       name: live?.name ?? job?.name ?? null,
       title: titleCandidate.title,
       titleSource: titleCandidate.source,
+      mission,
       projectPath,
       projectName,
+      project,
       repoRoot: git?.repoRoot ?? (projectPath || null),
       repoName: git?.repoName ?? (projectPath ? projectName : null),
-      gitBranch: view?.gitBranch ?? git?.branch ?? null,
+      gitBranch:
+        (view?.gitBranch && view.gitBranch !== 'HEAD' ? view.gitBranch : null) ??
+        git?.branch ??
+        null,
       gitRemoteUrl: git?.remoteUrl ?? null,
       kind: live?.kind ?? (job ? 'background' : 'unknown'),
       status,
@@ -1156,6 +1165,30 @@ export class SessionManager {
       messageCount: view?.messageCount ?? 0,
       source: runtime && hookFresh ? 'hook' : live ? 'registry' : job ? 'background' : 'transcript',
     }
+  }
+
+  private sessionMission(
+    id: string,
+    view: TranscriptView | null,
+    live: LiveSession | null,
+    job: BackgroundJob | null,
+    customTitle: string | null,
+  ): string {
+    if (customTitle?.trim()) return oneLine(customTitle, 120)
+    // The first prompt is the mission and stays stable while the session works;
+    // the last prompt, a background intent and the terminal name are fallbacks
+    // for transcripts that start with a compaction preamble or hold no text.
+    const candidates = [
+      view?.firstPrompt,
+      view?.lastPrompt,
+      job?.intent ? cleanPrompt(job.intent) : null,
+      live?.name,
+    ]
+    for (const candidate of candidates) {
+      const headline = missionHeadline(candidate)
+      if (headline) return headline
+    }
+    return `Session ${shortId(id)}`
   }
 
   private pickTitle(

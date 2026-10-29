@@ -1,6 +1,6 @@
 {
   "name": "claude-session-manager",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A self-hosted web control plane and Claude Code plugin for monitoring, answering and coordinating local Claude Code sessions.",
   "license": "MIT",
   "type": "module",

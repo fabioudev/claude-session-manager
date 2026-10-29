@@ -74,6 +74,10 @@ export interface InitialRead {
   lines: string[]
   remainder: Buffer
   offset: number
+  /** Byte offset just past the last complete head line — safe to resume a scan. */
+  headEnd: number
+  /** How many of `lines` came from the head; the rest are the tail. */
+  headLineCount: number
 }
 
 /**
@@ -92,7 +96,13 @@ export async function readInitialTranscript(
   if (size <= headBytes + tailBytes) {
     const buffer = await readSlice(file, 0, size)
     const { lines, remainder } = splitBufferLines(buffer, false)
-    return { lines, remainder, offset: size }
+    return {
+      lines,
+      remainder,
+      offset: size,
+      headEnd: size - remainder.length,
+      headLineCount: lines.length,
+    }
   }
 
   const headBuffer = await readSlice(file, 0, headBytes)
@@ -100,5 +110,41 @@ export async function readInitialTranscript(
   const tailStart = Math.max(headBytes, size - tailBytes)
   const tailBuffer = await readSlice(file, tailStart, size)
   const tail = splitBufferLines(tailBuffer, true)
-  return { lines: [...head.lines, ...tail.lines], remainder: tail.remainder, offset: size }
+  return {
+    lines: [...head.lines, ...tail.lines],
+    remainder: tail.remainder,
+    offset: size,
+    headEnd: headBytes - head.remainder.length,
+    headLineCount: head.lines.length,
+  }
+}
+
+/**
+ * Read complete lines from a known line boundary forward, one bounded chunk at a
+ * time, until `onLines` reports it has what it needs. Used to find a session's
+ * first prompt when slash commands or long pastes push it past the head window;
+ * the caller never has to load the middle of a huge transcript.
+ */
+export async function scanLines(
+  file: string,
+  start: number,
+  size: number,
+  onLines: (lines: string[]) => boolean,
+  options: { maxBytes?: number; chunkBytes?: number } = {},
+): Promise<boolean> {
+  const budget = options.maxBytes ?? 4 * 1024 * 1024
+  const chunkBytes = options.chunkBytes ?? 262_144
+  const limit = Math.min(size, start + budget)
+  let cursor = start
+  let carry: Buffer = Buffer.alloc(0)
+  while (cursor < limit) {
+    const end = Math.min(limit, cursor + chunkBytes)
+    const slice = await readSlice(file, cursor, end)
+    const buffer = carry.length ? Buffer.concat([carry, slice]) : slice
+    const { lines, remainder } = splitBufferLines(buffer, false)
+    carry = remainder
+    if (onLines(lines)) return true
+    cursor = end
+  }
+  return false
 }

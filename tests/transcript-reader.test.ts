@@ -4,6 +4,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   readInitialTranscript,
+  scanLines,
   splitBufferLines,
   statTranscript,
 } from '../server/transcript/reader.js'
@@ -59,6 +60,8 @@ describe('transcript file reads', () => {
     expect(read.lines).toEqual(['{"a":1}', '{"b":2}'])
     expect(read.remainder.toString()).toBe('{"c"')
     expect(read.offset).toBe(info!.size)
+    expect(read.headLineCount).toBe(2)
+    expect(read.headEnd).toBe('{"a":1}\n{"b":2}\n'.length)
   })
 
   it('reads the head and tail of a large file without loading the middle', async () => {
@@ -75,5 +78,54 @@ describe('transcript file reads', () => {
     expect(read.lines.at(-1)).toContain('"index":99')
     expect(read.lines.length).toBeLessThan(100)
     expect(read.offset).toBe(info!.size)
+    expect(read.headLineCount).toBeGreaterThan(0)
+    expect(read.headLineCount).toBeLessThan(read.lines.length)
+    expect(read.headEnd).toBeLessThanOrEqual(1000)
+    expect(read.headEnd).toBeGreaterThan(0)
+    expect(read.lines[read.headLineCount - 1]).toContain(`"index":${read.headLineCount - 1}`)
+  })
+
+  it('scans forward from the head boundary in bounded chunks', async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'csm-reader-'))
+    const file = path.join(dir, 'scan.jsonl')
+    const lines: string[] = []
+    for (let index = 0; index < 100; index += 1) {
+      lines.push(JSON.stringify({ index, padding: 'x'.repeat(100) }))
+    }
+    await writeFile(file, `${lines.join('\n')}\n`, 'utf8')
+    const info = await statTranscript(file)
+    const read = await readInitialTranscript(file, info!, { headBytes: 500, tailBytes: 500 })
+    const seen: number[] = []
+    const hit = await scanLines(
+      file,
+      read.headEnd,
+      info!.size,
+      (chunk) => {
+        for (const line of chunk) seen.push((JSON.parse(line) as { index: number }).index)
+        return seen.includes(12)
+      },
+      { chunkBytes: 128, maxBytes: 4096 },
+    )
+    expect(hit).toBe(true)
+    expect(seen[0]).toBe(read.headLineCount)
+    expect(seen).toContain(12)
+    expect(seen).toEqual([...seen].sort((a, b) => a - b))
+    expect(new Set(seen).size).toBe(seen.length)
+  })
+
+  it('stops scanning at the byte budget', async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'csm-reader-'))
+    const file = path.join(dir, 'budget.jsonl')
+    const lines: string[] = []
+    for (let index = 0; index < 100; index += 1) {
+      lines.push(JSON.stringify({ index, padding: 'x'.repeat(100) }))
+    }
+    await writeFile(file, `${lines.join('\n')}\n`, 'utf8')
+    const info = await statTranscript(file)
+    const hit = await scanLines(file, 0, info!.size, () => false, {
+      chunkBytes: 128,
+      maxBytes: 256,
+    })
+    expect(hit).toBe(false)
   })
 })

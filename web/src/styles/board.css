@@ -224,6 +224,53 @@
   color: var(--ink-2);
 }
 
+/* ---------- session groups ---------- */
+
+.board-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  margin-top: 14px;
+}
+
+.board-group {
+  min-width: 0;
+}
+
+.group-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 9px;
+  padding: 0 4px 10px;
+}
+
+.group-head h3 {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 590;
+  letter-spacing: -0.01em;
+}
+
+.group-needs .group-head h3 {
+  color: var(--accent);
+}
+
+.group-count {
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.group-hint {
+  flex-basis: 100%;
+  max-width: 72ch;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
 /* ---------- session rows ---------- */
 
 .session-list {
@@ -233,7 +280,7 @@
 .session-row {
   position: relative;
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) 132px 78px;
+  grid-template-columns: 14px minmax(0, 1fr) auto 96px;
   gap: 4px 18px;
   align-items: center;
   min-height: 92px;
@@ -301,6 +348,7 @@
 }
 
 .session-title {
+  min-width: 0;
   overflow: hidden;
   color: var(--ink);
   font-size: 14.5px;
@@ -310,11 +358,44 @@
   white-space: nowrap;
 }
 
-.session-id {
+.session-status-pill {
   flex: none;
+  justify-content: center;
+  min-height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 550;
+  letter-spacing: 0.01em;
+}
+
+.session-status-pill .dot {
+  display: none;
+}
+
+.session-status-pill.status-waiting {
+  border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+  background: var(--accent-soft);
+}
+
+.session-status-pill.status-working {
+  border-color: var(--ink-3);
+  background: var(--raised);
+  color: var(--ink);
+}
+
+.session-status-pill.status-idle {
+  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+  background: transparent;
+  color: var(--success);
+}
+
+.session-status-pill.status-ended,
+.session-status-pill.status-unknown {
+  border-color: transparent;
+  background: transparent;
   color: var(--ink-3);
-  font-family: var(--font-mono);
-  font-size: 9.5px;
 }
 
 .pin-mark {
@@ -322,21 +403,52 @@
   color: var(--ink-3);
 }
 
-.session-task {
-  display: -webkit-box;
+.session-state {
+  display: block;
   margin-top: 3px;
   overflow: hidden;
   color: var(--ink-2);
   font-size: 12.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-state.state-waiting {
+  color: var(--accent);
+}
+
+.session-state.state-working {
+  color: var(--ink);
+}
+
+.session-state.state-idle {
+  color: var(--ink);
+}
+
+.session-state.state-ended,
+.session-state.state-unknown {
+  color: var(--ink-3);
+}
+
+.session-context {
+  display: -webkit-box;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--ink-3);
+  font-size: 12px;
   line-height: 1.4;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
   overflow-wrap: anywhere;
 }
 
-.session-task.placeholder {
+.context-label {
+  margin-right: 6px;
   color: var(--ink-3);
-  font-style: italic;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.02em;
 }
 
 .session-meta {
@@ -360,6 +472,11 @@
 
 .meta-item svg {
   flex: none;
+}
+
+.meta-project {
+  color: var(--ink-2);
+  font-weight: 500;
 }
 
 .session-flags {
@@ -388,36 +505,30 @@
   min-width: 0;
 }
 
-.trace-caption {
-  color: var(--ink-3);
-  font-family: var(--font-mono);
-  font-size: 8.5px;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
-
 .session-side {
   grid-column: 4;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 5px;
+  gap: 3px;
   align-self: start;
   padding-top: 2px;
+}
+
+.session-time {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .session-age {
   color: var(--ink-3);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: 10px;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.session-source {
-  color: var(--ink-3);
-  font-family: var(--font-mono);
-  font-size: 8.5px;
   white-space: nowrap;
 }
 
@@ -580,8 +691,12 @@
     display: none;
   }
 
-  .session-source {
-    display: none;
+  .session-state {
+    display: -webkit-box;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
   }
 
   .session-row {
@@ -591,10 +706,6 @@
 
   .trace {
     width: min(150px, 38vw);
-  }
-
-  .trace-caption {
-    display: none;
   }
 
   .question-card {

@@ -102,8 +102,12 @@ export interface SessionSummary {
   name: string | null
   title: string
   titleSource: 'name' | 'custom' | 'prompt' | 'summary' | 'id'
+  /** One-line headline of what the session was asked to do, for the board. */
+  mission: string
   projectPath: string
   projectName: string
+  /** Top-level project folder under the home directory, independent of the repo. */
+  project: string | null
   repoRoot: string | null
   repoName: string | null
   gitBranch: string | null

@@ -71,6 +71,81 @@ export function isProbablyPrompt(text: string): boolean {
   return true
 }
 
+const CONTINUATION_PREAMBLE = /^This session is being continued from a previous conversation/i
+
+/** Conversational openers that carry no information for a headline. */
+const FILLER_LEAD =
+  /^(?:please|bitte|(?:can|could|would) you(?: please)?|(?:kannst|könntest|würdest) du(?: mir)?(?: bitte)?|i (?:want|need) you to|ich (?:möchte|will)(?:, dass du)?|ich hätte gern(?:, dass du)?|hilf mir(?: bitte)?|help me(?: to)?)\b[,:]?\s+/i
+
+/**
+ * The original ask embedded in Claude Code's compaction preamble. A resumed
+ * session starts with "This session is being continued…" followed by the
+ * summary; the "Primary Request and Intent" section quotes the user's own words.
+ */
+function intentFromSummary(text: string): string | null {
+  if (!CONTINUATION_PREAMBLE.test(text)) return null
+  const section = text.match(
+    /Primary Request and Intent:\s*([\s\S]*?)(?=\n\s*(?:\d+\.\s+[A-Z]|Summary:|Key Technical Concepts)|$)/i,
+  )
+  const body = section?.[1] ?? ''
+  if (!body.trim()) return null
+  const quoted = body.match(/["“]([^"”\n]{12,}?)["”]/)
+  if (quoted?.[1]) return quoted[1]
+  const bullet = body.match(/^\s*[-*]\s+(.+)$/m)?.[1] ?? body
+  return bullet
+    .replace(/^\s*(?:first|second|third|fourth|fifth|then)\b[,:]?\s*/i, '')
+    .replace(/^the user (?:asked|wanted)(?: me)? to\s+/i, '')
+}
+
+/**
+ * A short headline that says what a session was asked to do. Derived from the
+ * first prompt, so it stays stable across the life of a session; compaction
+ * preambles are unwrapped to the original request. Returns '' when the text
+ * holds nothing usable (callers fall back to another signal).
+ */
+export function missionHeadline(text: string | null | undefined, max = 76): string {
+  if (!text) return ''
+  const original = text.trim()
+  if (!original) return ''
+  let value: string
+  if (CONTINUATION_PREAMBLE.test(original)) {
+    // Never let the preamble itself become a headline; without a summary
+    // section the caller should fall back to another signal.
+    const intent = intentFromSummary(original)
+    if (!intent) return ''
+    value = intent
+  } else {
+    value = original
+  }
+  value = cleanPrompt(value)
+  value = value.replace(/^[\s>*#•·–—]+/, '')
+  value = value.replace(/\s+/g, ' ').trim()
+  // People often paste the repository link before the actual request.
+  value = value.replace(/^(?:(?:https?:\/\/|www\.)\S+\s*)+/i, '').trim()
+  // A prompt that is entirely wrapped in quotes is still the prompt.
+  value = value.replace(/^["“'](.+)["”']$/, '$1').trim()
+  for (let pass = 0; pass < 2; pass += 1) {
+    value = value.replace(FILLER_LEAD, '')
+  }
+  value = value.replace(/[*_`]/g, '').trim()
+  // Cut at the first sentence boundary once it carries enough context.
+  const sentence = value.match(/^(.{16,}?[.!?])(?:\s|$)/)
+  if (sentence?.[1]) value = sentence[1]
+  value = value.replace(/\.+$/, '').trim()
+  if (!value) return ''
+  if (value.length > max) {
+    const cut = value.slice(0, max - 1)
+    const space = cut.lastIndexOf(' ')
+    value = `${(space > max * 0.5 ? cut.slice(0, space) : cut).trimEnd()}…`
+  }
+  // Headline capitalisation, but never for paths or dotted identifiers.
+  const firstWord = value.split(' ', 1)[0] ?? ''
+  if (/^[a-zäöüß]/.test(value) && !firstWord.includes('/') && !firstWord.includes('.')) {
+    value = value.charAt(0).toUpperCase() + value.slice(1)
+  }
+  return value
+}
+
 export function safeJsonParse<T = unknown>(text: string): T | null {
   try {
     return JSON.parse(text) as T
@@ -228,4 +303,23 @@ export function projectNameFromPath(projectPath: string): string {
   if (!projectPath) return 'unknown'
   const base = path.basename(projectPath)
   return base || projectPath
+}
+
+/**
+ * The project a session belongs to, independent of its git repository. Projects
+ * live in a folder directly under the home directory; anything deeper — a sub
+ * repo, a worktree, a package — still belongs to that top-level folder. The home
+ * directory itself names nothing, so it returns null.
+ */
+export function projectLabel(projectPath: string, home = homedir()): string | null {
+  if (!projectPath) return null
+  const target = path.resolve(projectPath)
+  const base = path.resolve(home)
+  if (target === base) return null
+  const relative = path.relative(base, target)
+  if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+    const [first] = relative.split(path.sep)
+    return first || null
+  }
+  return path.basename(target) || null
 }

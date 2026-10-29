@@ -151,7 +151,11 @@ export function CoordinationPage() {
               <div className="panel-head">
                 <h2 id="composer-heading">Send a message</h2>
                 <span className="count">
-                  {connection === 'live' ? 'live daemon' : 'last known state'}
+                  {connection === 'live'
+                    ? 'live daemon'
+                    : connection === 'polling'
+                      ? 'polling daemon'
+                      : 'last known state'}
                 </span>
               </div>
               <form onSubmit={send}>

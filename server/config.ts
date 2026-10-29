@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expandHome } from './util.js'
+import { VERSION } from './version.js'
 
 export interface AppConfig {
   mode: 'serve' | 'doctor' | 'version' | 'help'
@@ -138,7 +139,7 @@ export function parseConfig(
   }
 }
 
-export const HELP = `claude-session-manager ${'0.1.0'}
+export const HELP = `claude-session-manager ${VERSION}
 
 A self-hosted web control plane for local Claude Code sessions.
 
