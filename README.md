@@ -6,10 +6,12 @@
 
 A self-hosted web control plane for Claude Code sessions running on one machine.
 
-The board shows what every session is working on, which project it belongs to, which repository
+The command center gives one main session a high-level goal, lets it delegate durable tasks to the
+other sessions, and keeps progress, decisions and shared knowledge in one place. The separate
+session board shows what every session is working on, which project it belongs to, which repository
 and branch it is in, and whether it is working, waiting or finished. When a session asks a
-question, the question appears on the board and you can answer it from the browser — the terminal
-does not need focus.
+question, the question appears in the browser and you can answer it there — the terminal does not
+need focus.
 
 A Claude Code plugin connects the sessions. It reports their lifecycle and tool activity, and it
 teaches each session that the other sessions exist, so they can message each other, warn about
@@ -22,6 +24,16 @@ overlapping edits and review each other's changes before overwriting them.
 
 ## What you get
 
+- **Command center** — give a goal and follow delegated work through queue, in motion, blocked,
+  review and done. The first command starts a dedicated commander automatically (or resumes the
+  selected one); it receives a snapshot of sessions, tasks, decisions and knowledge up front.
+  Decisions and unavailable workers are collected under **Needs you**.
+- **Durable task ledger** — assignment, priority, explicit progress, notes, results, delivery state,
+  revisions and activity history survive daemon restarts. Workers finish in review; the commander
+  or human verifies and closes the task.
+- **Shared knowledge** — durable decisions and conventions can be global or scoped to a project and
+  its child directories. Pinned entries enter every relevant prompt; all active entries are
+  available at session start and through `list_knowledge`.
 - **Live board** — a one-line mission headline, current step, status, project, repository, branch
   and a 30-minute signal trace for every session, including background jobs and finished sessions.
 - **Questions in the browser** — `AskUserQuestion` prompts are held by a hook and answered from the
@@ -62,6 +74,53 @@ flowchart LR
 The daemon also works without the plugin: it watches `~/.claude/projects/**/*.jsonl` and derives
 status, tasks and activity from transcripts. The plugin adds instant hook events, the question
 bridge and coordination.
+
+## Command center
+
+Open `/` and type a goal. With no **Main session** selected, the first command launches a dedicated
+`Commander` session in its own tmux pane and adopts it; a selected commander that went offline is
+resumed with its existing transcript. Launching follows the same settings as any other session, and
+the picker still allows choosing a specific live session instead (`CSM_COMMANDER_CWD` changes the
+working directory, default `~`). The original session board remains at `/sessions`.
+
+The commander runs in tmux rather than as a background job on purpose: a background job cannot take
+typed input, and the daemon that owns it dies with the service's process group. A tmux pane survives
+daemon restarts, so later commands are typed straight into the live commander. Commands that arrive
+while it is working wait in the inbox; when it comes to rest the board types them itself.
+
+The command prompt is self-contained. Besides the human goal it carries a bounded snapshot of live
+sessions (exact ids, status, project, current task, pending question), open delegated tasks with
+assignees and latest notes, unresolved human decisions, and active shared knowledge. The commander
+can plan immediately and calls `get_command_center` only when it wants fresher state. It is told to
+delegate in the same turn instead of only planning, to accept a new goal for a different project at
+any time, and to keep monitoring what it started.
+
+The **Commander channel** under the command box is the large feedback window: your goals on the
+right, the commander's `report_status` reports on the left, and automatic ledger lines (delegated,
+in progress, ready for review, blocked, completed, waiting on you) in between. It is chronological
+and scrolls to the newest entry. **Features in flight** groups all open tasks by project, with a
+declared-progress bar, running/review/blocked counts and the individual tasks — so "which feature is
+being worked on, and where does it stand?" is answered without opening anything.
+
+Assignment dispatches the task automatically. `typed` means the prompt was entered into a live
+pane; `queued` means it waits in the session inbox. Neither state proves execution: progress and
+status change only when the worker reports them (or when the human edits the task in the UI).
+Workers report `in_progress`, `blocked` or `review`, a percentage, notes and a result. Only the
+main session or a human can mark work `done` or `cancelled`. Revisions reject stale concurrent
+updates instead of overwriting a newer report.
+
+A worker calls `request_decision` when only the human can unblock it. The durable question appears
+under **Needs you**, optionally blocking its linked task. Your answer is saved and sent to the
+requesting session; existing `AskUserQuestion` cards appear in the same area.
+
+Knowledge is not scraped from conversations. Add it deliberately in the UI or with
+`share_knowledge`: a title, body, optional tags and an optional absolute project path. Only the
+commander or human can pin an entry into every prompt. Workers can publish unpinned notes for
+their peers. Archived entries remain in the ledger but are no longer injected.
+
+The command ledger lives in `<dataDir>/command-center.json`, independently of `state.json`, and is
+written atomically. A corrupt file is moved aside before an empty ledger is started. There is no
+autonomous scheduler and no automatic task completion.
 
 ## Install
 
@@ -113,6 +172,100 @@ In a Claude Code session:
 Restart Claude Code or start a new session. The sidebar should show **Plugin connected** after the
 first hook event. `/csm:status` prints the board summary inside a session.
 
+### Keeping Claude Code and the plugin current
+
+- **Claude Code** updates itself: native installs download new versions in the background and use
+  them the next time a session starts. Homebrew, WinGet and distro packages update through their
+  package manager; `claude update` does it by hand in every case.
+- **The plugin** updates from its marketplace. Marketplaces you add yourself, including this one,
+  default to no automatic updates. Turn on **Auto-update** in `/plugin` → Marketplaces, or add it
+  to your settings so it stays on:
+
+  ```json
+  {
+    "extraKnownMarketplaces": {
+      "claude-session-manager": {
+        "source": { "source": "github", "repo": "fabioudev/claude-session-manager" },
+        "autoUpdate": true
+      }
+    }
+  }
+  ```
+
+  Claude Code then refreshes the marketplace and the installed plugin after the first message of a
+  session (with a random delay of up to ten minutes), or run
+  `claude plugin update csm@claude-session-manager` yourself. The new version loads in the next
+  session, or immediately with `/reload-plugins`.
+
+Running sessions keep the version they started with. The daemon reads the installed Claude Code and
+plugin versions and flags every session that is behind — an **update ready** chip on the board and
+a restart banner on the session page.
+
+**Restart in place.** On Linux, when a session runs in a tmux pane, the session page can restart an
+idle interactive session: it exits Claude Code, starts it again with `--resume` in the same pane,
+and the conversation continues where it left off. _Settings → Restart sessions after updates_
+(off by default) does the same automatically when a newer version is installed, but only after the
+session has been quiet for three minutes. It never touches a session that is working, waiting for
+an answer, or not running in tmux; a session is restarted at most once per installed version, and a
+manual restart has a ten-minute cooldown. Sessions outside tmux need a manual restart in their
+terminal. A session that has not had a first turn yet is refused (there is no conversation to
+resume), and so is a pane with another program in the foreground — keystrokes would otherwise land
+in that program.
+
+**Resume an ended session.** While a session is live, the daemon remembers the command that started
+it, including a launcher wrapper and its flags. When that session has ended, its page offers
+_Resume_: csm starts a new detached tmux session in the same directory and runs the same command
+with `--resume <session-id>`, so the conversation continues. A session the daemon only ever saw in
+a transcript uses the **Session launcher** from Settings instead — a wrapper that carries
+authentication or a default model, such as `ollama launch claude --model <model> --`, or plain
+`claude` when the field is empty; the session page names the command it will use. A session without
+a transcript is not offered. If the resume command crashes on startup, the last lines of the pane
+are reported and the tmux session is removed again.
+
+## Preview links
+
+A session that serves a dev server or a tunnel can carry a **preview** link on the board and on its
+page. There are three sources, in this order:
+
+1. **A registration.** A session calls the `register_preview` tool with the port its dev server
+   listens on (for example `register_preview { port: 5173 }`). The daemon registers the name and
+   the preview router forwards `https://<name>.<zone>` to `127.0.0.1:<port>` until it expires
+   (12 hours by default; asking again extends it). The zone is set in _Settings → Preview links_
+   and the router's port with `CSM_PREVIEW_PORT` (8090 by default, `0` disables it).
+2. **A project rule** in _Settings → Preview links_: `pattern = https://address` per line, matched
+   against the project path and repository names. `*` is a wildcard.
+3. **A URL in output.** Host suffixes such as `trycloudflare.com` or your own dev domain; subdomains
+   match too.
+
+| List                                   | Purpose                                                                                                         |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **Preview zone**                       | The domain registered previews live under, for example `dev-fixplay.de`. Empty disables registrations.          |
+| **Project rules**                      | `pattern = https://address` per line, matched against the project path and repository names. `*` is a wildcard. |
+| **Hosts recognised in session output** | Host suffixes such as `trycloudflare.com` or your own dev domain; subdomains match too.                         |
+
+A registration wins over a rule, and a rule wins over anything found in output. When no rule
+matches, the newest `http(s)` URL a tool printed in the last day on one of the listed hosts becomes
+the preview — a tunnel address, for example. Prose the session wrote itself is ignored: a URL in a
+message may belong to a peer's tunnel, a documentation page or a command. Only `http`/`https` URLs
+without embedded credentials are ever rendered, so a transcript cannot inject a `javascript:` link.
+A rule such as `fixplay-diagnoseTool = https://dev-diagnosetool.example.com` covers a whole checkout;
+`*admin* = https://dev-admin.example.com` covers worktrees and branches by name.
+
+A registration can also carry `routes` for an app whose dev server does not serve its own API: the
+longest matching path prefix goes to another loopback port instead, optionally with the prefix
+stripped — `register_preview { port: 5176, routes: [{ prefix: '/api/', port: 7100 }] }`. Without
+routes, a split frontend/backend setup shows a working page with a broken `/api`.
+
+The router answers only for names registered right now, rewrites `Host` to `localhost:<port>` (Vite
+and Nuxt reject unknown hosts) and tunnels WebSocket upgrades, so HMR works. It is loopback-only
+unless you set `CSM_PREVIEW_BIND`; a non-loopback bind requires `CSM_PREVIEW_SECRET`, which the TLS
+terminator must send as `x-preview-secret`. With `CSM_PREVIEW_PASSWORD` a visitor logs in once and a
+signed, `HttpOnly` cookie then carries the page, its assets, XHRs and the HMR socket — apps keep
+their own `Authorization` headers and redirects keep working. See [docs/preview-ingress.md](docs/preview-ingress.md)
+for the Caddy configuration that terminates TLS for the zone and asks the daemon before it requests
+a certificate.
+
+
 ## Answering questions
 
 ![Answering a held question in the browser](docs/screenshots/answer-question.png)
@@ -134,8 +287,8 @@ Two modes are available in **Settings → Where sessions ask questions**:
 
 The browser never executes tools. It only delivers the answer text.
 
-Settings also hold the wait timeout, the launch toggle and the appearance choice, and show the
-daemon's paths, version and write state:
+Settings also hold the wait timeout, the launch toggle, the session launcher and the appearance
+choice, and show the daemon's paths, version and write state:
 
 ![Settings](docs/screenshots/settings.png)
 
@@ -158,7 +311,10 @@ by more than one session and active claims.
 | `claim_files`    | Announce files this session is about to edit                       |
 | `release_files`  | Release claims                                                     |
 
-Messages are delivered on the recipient's next prompt or through `read_inbox`. Claims expire
+Messages are delivered on the recipient's next prompt or through `read_inbox`. A task entered on a
+session page is different: a live, idle session gets it typed into its tmux pane and starts working
+at once (multi-line text arrives as one bracketed paste). Everything else — ended, working, at a
+question or a shell — falls back to the inbox, and the board says why. Claims expire
 automatically. When two sessions edit the same file within a two-hour window, the board marks an
 overlap and the editing session gets a warning with the other session's name.
 
@@ -243,30 +399,46 @@ itself current with a five-second polling fallback.
 All routes are under `/api`. When a token is configured, send `Authorization: Bearer <token>`
 (or `X-CSM-Token`). Hook and MCP routes are used by the plugin.
 
-| Method   | Route                      | Purpose                               |
-| -------- | -------------------------- | ------------------------------------- |
-| `GET`    | `/health`                  | Liveness, version, start time         |
-| `GET`    | `/config`                  | Public settings and daemon paths      |
-| `GET`    | `/sessions`                | Session summaries                     |
-| `GET`    | `/sessions/:id`            | Session detail                        |
-| `PATCH`  | `/sessions/:id`            | Rename, pin or archive                |
-| `POST`   | `/sessions/:id/inbox/read` | Read and clear a session's inbox      |
-| `POST`   | `/sessions/:id/claims`     | Claim files                           |
-| `DELETE` | `/sessions/:id/claims`     | Release claims                        |
-| `POST`   | `/sessions/:id/stop`       | Stop a background job                 |
-| `GET`    | `/questions`               | Pending questions                     |
-| `POST`   | `/questions/:id/answer`    | Answer a held question                |
-| `POST`   | `/questions/:id/dismiss`   | Release a question to the terminal    |
-| `GET`    | `/coordination`            | Messages, claims, overlaps, touches   |
-| `GET`    | `/messages`                | Message stream                        |
-| `POST`   | `/messages`                | Send a message                        |
-| `POST`   | `/launch`                  | Start a background session            |
-| `PATCH`  | `/settings`                | Question mode, timeout, launch toggle |
-| `GET`    | `/events`                  | Server-sent events                    |
-| `POST`   | `/hooks/event`             | Plugin hook bridge                    |
-| `POST`   | `/mcp/messages`            | Plugin MCP: send a message            |
-| `GET`    | `/mcp/inbox`               | Plugin MCP: read inbox                |
-| `POST`   | `/mcp/claims`              | Plugin MCP: claims and shared changes |
+| Method   | Route                      | Purpose                                        |
+| -------- | -------------------------- | ---------------------------------------------- |
+| `GET`    | `/health`                  | Liveness, version, start time                  |
+| `GET`    | `/config`                  | Public settings and daemon paths               |
+| `GET`    | `/sessions`                | Session summaries                              |
+| `GET`    | `/sessions/:id`            | Session detail                                 |
+| `PATCH`  | `/sessions/:id`            | Rename, pin or archive                         |
+| `POST`   | `/sessions/:id/prompt`     | Type a task into a live session                |
+| `POST`   | `/sessions/:id/inbox/read` | Read and clear a session's inbox               |
+| `POST`   | `/sessions/:id/claims`     | Claim files                                    |
+| `DELETE` | `/sessions/:id/claims`     | Release claims                                 |
+| `POST`   | `/sessions/:id/stop`       | Stop a background job                          |
+| `GET`    | `/questions`               | Pending questions                              |
+| `POST`   | `/questions/:id/answer`    | Answer a held question                         |
+| `POST`   | `/questions/:id/dismiss`   | Release a question to the terminal             |
+| `GET`    | `/coordination`            | Messages, claims, overlaps, touches            |
+| `GET`    | `/messages`                | Message stream                                 |
+| `POST`   | `/messages`                | Send a message                                 |
+| `POST`   | `/launch`                  | Start a background session                     |
+| `PATCH`  | `/settings`                | Settings, including preview links              |
+| `GET`    | `/command-center`          | Tasks, knowledge, decisions, commands, channel |
+| `PUT`    | `/commander`               | Choose the main session                        |
+| `POST`   | `/commander/command`       | Send a goal to the main session                |
+| `POST`   | `/commander/updates`       | Commander report for the channel               |
+| `POST`   | `/tasks`                   | Create and auto-dispatch a task                |
+| `PATCH`  | `/tasks/:id`               | Report or edit a task                          |
+| `POST`   | `/tasks/:id/dispatch`      | Deliver a task again                           |
+| `POST`   | `/knowledge`               | Share knowledge                                |
+| `PATCH`  | `/knowledge/:id`           | Edit, pin or archive knowledge                 |
+| `POST`   | `/decisions`               | Ask the human, optionally blocking             |
+| `POST`   | `/decisions/:id/resolve`   | Answer a decision                              |
+| `GET`    | `/events`                  | Server-sent events                             |
+| `POST`   | `/hooks/event`             | Plugin hook bridge                             |
+| `POST`   | `/mcp/messages`            | Plugin MCP: send a message                     |
+| `GET`    | `/mcp/inbox`               | Plugin MCP: read inbox                         |
+| `POST`   | `/mcp/claims`              | Plugin MCP: claims and shared changes          |
+| `POST`   | `/mcp/preview`             | Plugin MCP: register a preview port            |
+| `DELETE` | `/mcp/preview`             | Plugin MCP: drop the preview                   |
+| `GET`    | `/previews`                | Live preview registrations                     |
+| `GET`    | `/previews/ask`            | TLS gate for on-demand certificates            |
 
 ## Data and privacy
 
@@ -276,9 +448,10 @@ Everything stays on the machine that runs the daemon.
   task titles, activity metadata (tool names, commands, file paths) and, in the transcript-derived
   ledger, prompt and response text. Transcripts may contain tool output, including file contents;
   the daemon parses them locally and does not send them anywhere.
-- **State** lives in `~/.claude-session-manager` with mode `0700`; `client.json` and `state.json`
-  are written atomically with mode `0600`. It contains session metadata, messages, claims and
-  settings — no file contents.
+- **State** lives in `~/.claude-session-manager` with mode `0700`; `client.json`, `state.json` and
+  `command-center.json` are written atomically with mode `0600`. It contains session metadata,
+  messages, claims, settings, task briefs, knowledge entries and human decisions — no transcripts
+  or file contents.
 - **The plugin** sends tool metadata (paths, commands, AskUserQuestion input) to the daemon on
   loopback. It never sends file contents and fails soft: without the daemon Claude Code behaves as
   if the plugin were absent.

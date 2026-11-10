@@ -1,13 +1,25 @@
 import type {
   ClaimInput,
+  CommandCenterSnapshot,
+  CommanderCommand,
   CoordinationView,
+  DecisionRequest,
+  DelegatedTask,
+  DelegatedTaskInput,
+  DelegatedTaskPatch,
   FileClaim,
+  KnowledgeEntry,
+  KnowledgeInput,
+  KnowledgePatch,
   LaunchSessionInput,
   LaunchSessionResult,
   MessageInput,
   PendingQuestion,
+  PromptResult,
   PublicConfig,
   QuestionAnswerInput,
+  RestartSessionResult,
+  ResumeSessionResult,
   SessionDetail,
   SessionMessage,
   SessionPatch,
@@ -74,13 +86,21 @@ export function takeTokenFromUrl(): void {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('accept', 'application/json')
-  if (init.body !== undefined) headers.set('content-type', 'application/json')
+  let body = init.body
+  if (body === undefined) {
+    // Action routes take no payload. Send an empty object anyway so the request
+    // always carries an explicit content type, which every proxy and daemon
+    // understands without guessing.
+    const method = (init.method ?? 'GET').toUpperCase()
+    if (method !== 'GET' && method !== 'HEAD') body = '{}'
+  }
+  if (body !== undefined) headers.set('content-type', 'application/json')
   const token = getToken()
   if (token) headers.set('authorization', `Bearer ${token}`)
 
   let response: Response
   try {
-    response = await fetch(`/api${path}`, { ...init, headers })
+    response = await fetch(`/api${path}`, { ...init, body, headers })
   } catch {
     throw new ApiError('The daemon is not reachable.', 0, 'offline')
   }
@@ -171,10 +191,55 @@ export const api = {
     request<StopSessionResult>(`/sessions/${encodeURIComponent(id)}/stop`, {
       method: 'POST',
     }),
+  restart: (id: string) =>
+    request<RestartSessionResult>(`/sessions/${encodeURIComponent(id)}/restart`, {
+      method: 'POST',
+    }),
+  resume: (id: string) =>
+    request<ResumeSessionResult>(`/sessions/${encodeURIComponent(id)}/resume`, {
+      method: 'POST',
+    }),
+  prompt: (id: string, text: string) =>
+    request<PromptResult>(`/sessions/${encodeURIComponent(id)}/prompt`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
   updateSettings: (patch: SettingsPatch) =>
     request<PublicConfig>('/settings', {
       method: 'PATCH',
       body: JSON.stringify(patch),
+    }),
+  commandCenter: () => request<CommandCenterSnapshot>('/command-center'),
+  setCommander: (sessionId: string | null) =>
+    request<CommandCenterSnapshot>('/commander', {
+      method: 'PUT',
+      body: JSON.stringify({ sessionId }),
+    }),
+  command: (text: string) =>
+    request<CommanderCommand>('/commander/command', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+  createTask: (input: DelegatedTaskInput) =>
+    request<DelegatedTask>('/tasks', { method: 'POST', body: JSON.stringify(input) }),
+  updateTask: (id: string, patch: DelegatedTaskPatch) =>
+    request<DelegatedTask>(`/tasks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  dispatchTask: (id: string) =>
+    request<DelegatedTask>(`/tasks/${encodeURIComponent(id)}/dispatch`, { method: 'POST' }),
+  shareKnowledge: (input: KnowledgeInput) =>
+    request<KnowledgeEntry>('/knowledge', { method: 'POST', body: JSON.stringify(input) }),
+  updateKnowledge: (id: string, patch: KnowledgePatch) =>
+    request<KnowledgeEntry>(`/knowledge/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  resolveDecision: (id: string, answer: string) =>
+    request<DecisionRequest>(`/decisions/${encodeURIComponent(id)}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ answer }),
     }),
   health: () =>
     request<{ ok: boolean; version: string; time: number; startedAt: number }>('/health'),

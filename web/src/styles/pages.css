@@ -253,6 +253,21 @@
   padding-top: 1px;
 }
 
+.launcher-input {
+  width: 320px;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 4px 9px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+@media (max-width: 760px) {
+  .launcher-input {
+    width: 100%;
+  }
+}
+
 .segmented {
   display: inline-flex;
   min-width: 0;
@@ -528,4 +543,42 @@
   .gate-brand {
     margin-bottom: 44px;
   }
+}
+
+.task-panel {
+  margin-bottom: 18px;
+}
+
+.task-form .task-input {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.setting-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 14px;
+}
+
+.setting-field-label {
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+
+.preview-input {
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 9px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre;
 }

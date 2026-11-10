@@ -12,8 +12,26 @@ import { readFileSync, readdirSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const VERSION = '0.1.0'
 const DEBUG = process.env.CSM_DEBUG === '1'
+
+/**
+ * The manifest is the single source of truth for the plugin version. Reading it
+ * next to the hook keeps the reported version correct after a marketplace
+ * update without a second place to bump.
+ */
+function readPluginVersion() {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8'),
+    )
+    if (typeof manifest.version === 'string') return manifest.version
+  } catch {
+    // A missing manifest must not break a hook.
+  }
+  return '0.0.0'
+}
+
+const VERSION = readPluginVersion()
 const DEFAULT_TIMEOUT_MS = 5000
 const MAX_QUESTION_TIMEOUT_MS = 640_000
 

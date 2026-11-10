@@ -19,11 +19,14 @@ import {
   FileCode2,
   Folder,
   GitBranch,
+  Globe,
   type LucideIcon,
   MessageSquare,
   Pencil,
   Pin,
   PinOff,
+  Play,
+  RefreshCw,
   Send,
   Square,
   Wrench,
@@ -32,6 +35,7 @@ import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useStat
 import { Link, useParams } from 'react-router-dom'
 import { ApiError, api } from '../api'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { Markdown } from '../components/Markdown'
 import { QuestionCard } from '../components/QuestionCard'
 import { SignalTrace } from '../components/SignalTrace'
 import { StatusBadge } from '../components/StatusBadge'
@@ -112,7 +116,16 @@ function ActivityRow({ activity }: { activity: ActivityEvent }) {
         </div>
         <div className="activity-title">{activity.title}</div>
         {detail ? (
-          detail.length <= 220 ? (
+          activity.kind === 'response' ? (
+            detail.length <= 220 ? (
+              <Markdown text={detail} className="activity-detail activity-markdown" />
+            ) : (
+              <details className="activity-detail">
+                <summary>Show full reply</summary>
+                <Markdown text={detail} className="activity-markdown" />
+              </details>
+            )
+          ) : detail.length <= 220 ? (
             <p className="activity-detail">{detail}</p>
           ) : (
             <details className="activity-detail">
@@ -169,13 +182,18 @@ export function SessionPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [taskExpanded, setTaskExpanded] = useState(false)
+  const [replyExpanded, setReplyExpanded] = useState(false)
   const [titleDraft, setTitleDraft] = useState('')
   const [claimPath, setClaimPath] = useState('')
   const [claimPending, setClaimPending] = useState(false)
   const [confirmRelease, setConfirmRelease] = useState(false)
   const [confirmStop, setConfirmStop] = useState(false)
+  const [confirmRestart, setConfirmRestart] = useState(false)
+  const [resuming, setResuming] = useState(false)
   const [messageDraft, setMessageDraft] = useState('')
   const [sending, setSending] = useState(false)
+  const [taskDraft, setTaskDraft] = useState('')
+  const [sendingTask, setSendingTask] = useState(false)
   const tickRef = useRef(messageTick)
 
   const load = useCallback(async () => {
@@ -202,6 +220,7 @@ export function SessionPage() {
     setLoadError(null)
     setEditing(false)
     setTaskExpanded(false)
+    setReplyExpanded(false)
     setTitleDraft('')
     setClaimPath('')
     setMessageDraft('')
@@ -270,6 +289,31 @@ export function SessionPage() {
     }
   }
 
+  async function sendTask(event: FormEvent) {
+    event.preventDefault()
+    const text = taskDraft.trim()
+    if (!text || sendingTask || !session) return
+    setSendingTask(true)
+    try {
+      const result = await api.prompt(session.id, text)
+      setTaskDraft('')
+      if (result.mode === 'typed') {
+        notify(`Task sent to ${result.tmux ?? 'the session'}; it is on it now.`, 'success')
+      } else {
+        notify(
+          `Task queued for the session's next turn${result.note ? ` — ${result.note}` : ''}.`,
+          'neutral',
+        )
+      }
+      await load()
+      await refresh()
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : 'Could not send the task.', 'error')
+    } finally {
+      setSendingTask(false)
+    }
+  }
+
   async function claimFile(event: FormEvent) {
     event.preventDefault()
     const value = claimPath.trim()
@@ -310,10 +354,38 @@ export function SessionPage() {
     await refresh()
   }
 
+  async function restartSession() {
+    const result = await api.restart(id)
+    if (!result.ok) throw new Error(result.error || 'The session could not be restarted.')
+    notify(result.output || 'Session restarted.', 'success')
+    await load()
+    await refresh()
+  }
+
+  async function resumeSession() {
+    setResuming(true)
+    try {
+      const result = await api.resume(id)
+      if (!result.ok) throw new Error(result.error || 'The session could not be resumed.')
+      notify(
+        `${result.tmux ? `Session resumed in tmux session ${result.tmux}.` : 'Session resumed.'}${
+          result.note ? ` ${result.note}` : ''
+        }`,
+        result.note ? 'neutral' : 'success',
+      )
+      await load()
+      await refresh()
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : 'The session could not be resumed.', 'error')
+    } finally {
+      setResuming(false)
+    }
+  }
+
   if (missing) {
     return (
       <div className="detail-missing">
-        <Link className="back-link" to="/">
+        <Link className="back-link" to="/sessions">
           <ArrowLeft size={12} aria-hidden="true" />
           Board
         </Link>
@@ -324,7 +396,7 @@ export function SessionPage() {
             Claude directory.
           </p>
           <div className="empty-actions">
-            <Link className="btn" to="/">
+            <Link className="btn" to="/sessions">
               Back to the board
             </Link>
           </div>
@@ -362,12 +434,39 @@ export function SessionPage() {
   const readOnly = Boolean(config?.readOnly)
   const taskText = session.task || session.statusDetail
   const taskLong = taskText.length > 700
+  // The last thing the session said, not just the last thing it was asked. The
+  // detail header otherwise shows the prompt and leaves the answer buried in the
+  // activity list below the fold.
+  const lastReply = (detail?.activities ?? []).findLast((activity) => activity.kind === 'response')
+  const replyText = lastReply?.detail?.trim() || lastReply?.title || ''
+  const replyLong = replyText.length > 700
   const missionText = session.mission || session.title
   const taskRepeatsMission = repeatsMission(taskText, missionText)
+  const updateParts: string[] = []
+  if (session.update.claude) {
+    updateParts.push(
+      `Claude Code ${session.version ?? 'unknown'} → ${config?.installedClaudeVersion ?? 'a newer version'}`,
+    )
+  }
+  if (session.update.plugin) {
+    updateParts.push(
+      `plugin ${session.pluginVersion ?? 'unknown'} → ${config?.installedPluginVersion ?? 'a newer version'}`,
+    )
+  }
+  const updateText = updateParts.join(', ')
+  const restartBlocker = !config?.restartSupported
+    ? 'Restarting in place needs Linux and tmux, so restart this session in its terminal.'
+    : session.kind !== 'interactive'
+      ? 'Only interactive sessions can be restarted from the board.'
+      : !session.tmux
+        ? 'This session is not running in a tmux pane, so restart it in its terminal.'
+        : session.question
+          ? 'Answer or dismiss the open question first.'
+          : 'Restart is available once this session is idle.'
 
   return (
     <>
-      <Link className="back-link" to="/">
+      <Link className="back-link" to="/sessions">
         <ArrowLeft size={12} aria-hidden="true" />
         Board
       </Link>
@@ -426,6 +525,28 @@ export function SessionPage() {
                 {taskExpanded ? 'Show less' : 'Show full task'}
               </button>
             ) : null}
+            {lastReply ? (
+              <div className="detail-reply">
+                <div className="detail-reply-head">
+                  <span className="detail-task-label">Latest reply</span>
+                  <span className="detail-reply-time">{relativeTime(lastReply.at)}</span>
+                </div>
+                <Markdown
+                  text={replyText}
+                  className={replyLong && !replyExpanded ? 'detail-task is-clamped' : 'detail-task'}
+                />
+                {replyLong ? (
+                  <button
+                    type="button"
+                    className="task-toggle"
+                    aria-expanded={replyExpanded}
+                    onClick={() => setReplyExpanded((value) => !value)}
+                  >
+                    {replyExpanded ? 'Show less' : 'Show full reply'}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             <div className="detail-meta">
               {session.project ? (
                 <span className="meta-item meta-project">
@@ -448,8 +569,35 @@ export function SessionPage() {
               {session.startedAt ? (
                 <span className="meta-item">started {dateTime(session.startedAt)}</span>
               ) : null}
+              {session.preview ? (
+                <span className="meta-item meta-preview">
+                  <Globe size={11} aria-hidden="true" />
+                  <a
+                    href={session.preview.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={
+                      session.preview.source === 'registered'
+                        ? `Preview registered by this session: ${session.preview.url}`
+                        : session.preview.source === 'rule'
+                          ? `Preview from the Settings rule for this project: ${session.preview.url}`
+                          : `Preview found in this session's output: ${session.preview.url}`
+                    }
+                  >
+                    {session.preview.host}
+                  </a>
+                </span>
+              ) : null}
               <span className="meta-item">{formatModel(session.model)}</span>
               <span className="meta-item">{session.shortId}</span>
+              {session.resumableVia === 'launcher' ? (
+                <span
+                  className="meta-item"
+                  title="No launch command was captured for this session."
+                >
+                  resume via {config?.sessionLauncher?.trim() || 'claude'}
+                </span>
+              ) : null}
               {session.activity && session.status === 'working' ? (
                 <span className="meta-item detail-live-activity">
                   {session.activity.tool ? `${session.activity.tool}: ` : ''}
@@ -519,6 +667,18 @@ export function SessionPage() {
                 <Archive size={15} aria-hidden="true" />
               )}
             </button>
+            {session.resumable ? (
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={resuming}
+                title="Start this ended session again in a new tmux session and continue the conversation"
+                onClick={() => void resumeSession()}
+              >
+                <Play size={11} aria-hidden="true" />
+                {resuming ? 'Resuming…' : 'Resume'}
+              </button>
+            ) : null}
             {session.jobId ? (
               <button
                 type="button"
@@ -542,6 +702,37 @@ export function SessionPage() {
         </div>
       ) : null}
 
+      {session.update.available ? (
+        <div className="banner banner-update" role="status" style={{ marginTop: 24 }}>
+          <RefreshCw size={14} aria-hidden="true" />
+          <span>
+            <strong>A newer version is installed.</strong> {updateText}.
+            {session.update.restartable
+              ? ' Restart the session to load it; the conversation resumes where it left off.'
+              : ` ${restartBlocker}`}
+          </span>
+          <span className="banner-spacer" />
+          {session.update.restartable && !readOnly ? (
+            <button type="button" className="btn btn-sm" onClick={() => setConfirmRestart(true)}>
+              <RefreshCw size={11} aria-hidden="true" />
+              Restart
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {session.status === 'waiting' && !session.question ? (
+        <div className="banner banner-update" role="status" style={{ marginTop: 24 }}>
+          <AlertTriangle size={14} aria-hidden="true" />
+          <span>
+            <strong>Waiting in its terminal.</strong>{' '}
+            {session.statusDetail || 'Claude is waiting for input'}
+            {session.tmux ? ` (tmux ${session.tmux})` : ''}. A prompt or permission question has to
+            be answered there; the board cannot take it over.
+          </span>
+        </div>
+      ) : null}
+
       {question ? (
         <div className="detail-question">
           <QuestionCard question={question} />
@@ -550,6 +741,54 @@ export function SessionPage() {
 
       <div className="detail-grid">
         <div className="detail-main">
+          {!readOnly ? (
+            <section className="panel task-panel" aria-labelledby="task-heading">
+              <div className="panel-head">
+                <h2 id="task-heading">Give this session a task</h2>
+                <span className="count">
+                  {session.live ? 'typed into its pane' : 'queued until it runs'}
+                </span>
+              </div>
+              <form className="task-form" onSubmit={sendTask}>
+                <textarea
+                  className="textarea task-input"
+                  value={taskDraft}
+                  onChange={(event) => setTaskDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    // Enter sends, Shift+Enter starts a new line: the board is a
+                    // remote keyboard here, so the usual prompt habit applies.
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault()
+                      void sendTask(event)
+                    }
+                  }}
+                  placeholder={
+                    session.live
+                      ? 'What should it do next? Enter sends, Shift+Enter adds a line.'
+                      : 'This session is not running. The task waits in its inbox until it does.'
+                  }
+                  aria-label="Task for this session"
+                  maxLength={20000}
+                  rows={3}
+                />
+                <div className="composer-foot">
+                  <span className="composer-note">
+                    {session.live
+                      ? 'Goes straight into its tmux pane, like typing there.'
+                      : 'Queued in the inbox; the session reads it on its next turn.'}
+                  </span>
+                  <button
+                    className="btn btn-sm"
+                    type="submit"
+                    disabled={!taskDraft.trim() || sendingTask}
+                  >
+                    <Play size={11} aria-hidden="true" />
+                    {sendingTask ? 'Sending…' : 'Send task'}
+                  </button>
+                </div>
+              </form>
+            </section>
+          ) : null}
           <section className="panel trace-panel" aria-labelledby="signal-heading">
             <div className="panel-head">
               <h2 id="signal-heading">Signal, last 30 minutes</h2>
@@ -671,7 +910,15 @@ export function SessionPage() {
                 </span>
               </Fact>
               <Fact label="Model">{formatModel(session.model)}</Fact>
-              <Fact label="Version">{session.version ?? 'unknown'}</Fact>
+              <Fact label="Claude Code">{session.version ?? 'unknown'}</Fact>
+              {session.pluginVersion ? (
+                <Fact label="Plugin">
+                  {session.pluginVersion}
+                  {config && session.pluginVersion !== config.version
+                    ? ` (board ${config.version})`
+                    : ''}
+                </Fact>
+              ) : null}
               {terminal ? (
                 <Fact label="Terminal" mono>
                   {terminal}
@@ -844,6 +1091,16 @@ export function SessionPage() {
           danger
           onConfirm={stopSession}
           onClose={() => setConfirmStop(false)}
+        />
+      ) : null}
+
+      {confirmRestart ? (
+        <ConfirmDialog
+          title={`Restart “${missionText}”?`}
+          description="The session exits in its tmux pane and starts again with --resume, loading the newly installed Claude Code or plugin. The conversation is kept; anything typed in that pane while it restarts would be lost."
+          confirmLabel="Restart session"
+          onConfirm={restartSession}
+          onClose={() => setConfirmRestart(false)}
         />
       ) : null}
     </>

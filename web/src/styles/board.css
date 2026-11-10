@@ -305,7 +305,16 @@
   background: color-mix(in srgb, var(--ink) 2.8%, transparent);
 }
 
-.session-row:focus-visible {
+/* The row is clickable through this invisible stretched link; the preview
+   anchor above it stays a real link and cannot be nested inside another. */
+.session-row-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.session-row:focus-within {
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
@@ -719,4 +728,34 @@
   .trace-stats {
     gap: 18px;
   }
+}
+
+/* ---------- preview link ---------- */
+
+.session-flag.preview-flag {
+  position: relative;
+  z-index: 2;
+  color: var(--accent);
+  cursor: pointer;
+  border-bottom: 1px dotted color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.session-flag.preview-flag:hover {
+  border-bottom-style: solid;
+}
+
+.session-flag.preview-flag:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.meta-preview a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dotted color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.meta-preview a:hover {
+  border-bottom-style: solid;
 }

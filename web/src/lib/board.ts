@@ -1,13 +1,15 @@
 import type { SessionSummary } from '@shared/types'
-import { isNeedsYou } from './format'
+import { isNeedsYou, isWaitingInTerminal } from './format'
 
 /** The order the Overview paints its groups in: your turn first. */
-export const BOARD_ORDER = ['needs', 'finished', 'working', 'unknown'] as const
+export const BOARD_ORDER = ['needs', 'terminal', 'finished', 'working', 'unknown'] as const
 
 export type BoardGroupKey = (typeof BOARD_ORDER)[number]
 
 export interface BoardBuckets {
   needs: SessionSummary[]
+  /** Waiting for input that only exists in the session's terminal. */
+  terminal: SessionSummary[]
   finished: SessionSummary[]
   working: SessionSummary[]
   unknown: SessionSummary[]
@@ -23,6 +25,7 @@ export interface BoardBuckets {
 export function boardBuckets(sessions: SessionSummary[]): BoardBuckets {
   const buckets: BoardBuckets = {
     needs: [],
+    terminal: [],
     finished: [],
     working: [],
     unknown: [],
@@ -36,6 +39,8 @@ export function boardBuckets(sessions: SessionSummary[]): BoardBuckets {
       buckets.ended.push(session)
     } else if (isNeedsYou(session)) {
       buckets.needs.push(session)
+    } else if (isWaitingInTerminal(session)) {
+      buckets.terminal.push(session)
     } else if (session.status === 'working') {
       buckets.working.push(session)
     } else if (session.status === 'idle') {
@@ -50,6 +55,10 @@ export function boardBuckets(sessions: SessionSummary[]): BoardBuckets {
 /** Sessions that still have a process or a fresh transcript signal. */
 export function activeCount(buckets: BoardBuckets): number {
   return (
-    buckets.needs.length + buckets.finished.length + buckets.working.length + buckets.unknown.length
+    buckets.needs.length +
+    buckets.terminal.length +
+    buckets.finished.length +
+    buckets.working.length +
+    buckets.unknown.length
   )
 }

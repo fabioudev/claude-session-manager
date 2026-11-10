@@ -14,7 +14,7 @@ export function NotFoundPage() {
         <h3>Nothing is here.</h3>
         <p>The board, coordination stream and settings are one click away.</p>
         <div className="empty-actions">
-          <Link className="btn" to="/">
+          <Link className="btn" to="/sessions">
             <ArrowLeft size={13} aria-hidden="true" />
             Back to the board
           </Link>

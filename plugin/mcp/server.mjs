@@ -564,6 +564,163 @@ async function releaseFiles(args) {
   return `Released ${result.released ?? 0} claim(s) covering those paths.`
 }
 
+async function registerPreview(args) {
+  const identity = requireIdentity()
+  const port = Number(args?.port)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('port must be an integer between 1 and 65535')
+  }
+  const result = await api('/api/mcp/preview', {
+    method: 'POST',
+    sessionId: identity.sessionId,
+    body: {
+      port,
+      name: typeof args?.name === 'string' ? args.name : undefined,
+      ttlMinutes: typeof args?.ttl_minutes === 'number' ? args.ttl_minutes : undefined,
+      routes: Array.isArray(args?.routes) ? args.routes : undefined,
+    },
+  })
+  const until = new Date(result.expiresAt).toISOString()
+  if (!result.url) {
+    return `Preview registered as ${result.name} → 127.0.0.1:${result.port}, but the preview zone is not configured yet, so there is no public URL.`
+  }
+  return `Preview registered: ${result.url} → 127.0.0.1:${result.port} (until ${until}). The board now links it.`
+}
+
+async function clearPreview() {
+  const identity = requireIdentity()
+  const result = await api('/api/mcp/preview', {
+    method: 'DELETE',
+    sessionId: identity.sessionId,
+  })
+  return result.removed ? 'Preview unregistered.' : 'This session had no preview registered.'
+}
+
+async function getCommandCenter() {
+  const identity = requireIdentity()
+  const data = await api('/api/command-center', { sessionId: identity.sessionId })
+  const openDecisions = (data.decisions || []).filter((decision) => !decision.resolvedAt)
+  return JSON.stringify(
+    {
+      commanderSessionId: data.commanderSessionId,
+      yourSessionId: identity.sessionId,
+      tasks: (data.tasks || []).slice(0, 50),
+      openDecisions,
+      knowledge: (data.knowledge || []).filter((entry) => !entry.archivedAt).slice(0, 50),
+      recentCommands: (data.commands || []).slice(0, 10),
+    },
+    null,
+    2,
+  )
+}
+
+async function createTask(args) {
+  const identity = requireIdentity()
+  let assigneeSessionId = null
+  if (args?.assignee_session_id) {
+    const data = await api('/api/sessions')
+    assigneeSessionId = resolveSession(data.sessions || [], args.assignee_session_id).id
+  }
+  const task = await api('/api/tasks', {
+    method: 'POST',
+    sessionId: identity.sessionId,
+    body: {
+      title: args?.title,
+      brief: args?.brief,
+      priority: args?.priority,
+      assigneeSessionId,
+      projectPath: args?.project_path,
+    },
+  })
+  const delivery = task.lastDispatch
+    ? task.lastDispatch.ok
+      ? `Delivery: ${task.lastDispatch.mode}. ${task.lastDispatch.note || ''}`
+      : `Delivery failed: ${task.lastDispatch.error || 'unknown error'}. The task is blocked.`
+    : 'No assignee yet.'
+  return `Task ${task.id} created (${task.status}, ${task.progress}%). ${delivery}`
+}
+
+async function updateTask(args) {
+  const identity = requireIdentity()
+  const task = await api(`/api/tasks/${encodeURIComponent(args?.task_id || '')}`, {
+    method: 'PATCH',
+    sessionId: identity.sessionId,
+    body: {
+      status: args?.status,
+      progress: args?.progress,
+      note: args?.note,
+      result: args?.result,
+      expectedRevision: args?.expected_revision,
+    },
+  })
+  return `Task ${task.id} is now ${task.status}, ${task.progress}% (revision ${task.revision}).`
+}
+
+async function reportStatus(args) {
+  const identity = requireIdentity()
+  const update = await api('/api/commander/updates', {
+    method: 'POST',
+    sessionId: identity.sessionId,
+    body: {
+      kind: args?.kind,
+      title: args?.title,
+      body: args?.body,
+      projectPath: args?.project_path,
+      taskIds: args?.task_ids,
+    },
+  })
+  return `Reported "${update.title}" (${update.kind}) in the command center channel.`
+}
+
+async function dispatchTask(args) {
+  const identity = requireIdentity()
+  const task = await api(`/api/tasks/${encodeURIComponent(args?.task_id || '')}/dispatch`, {
+    method: 'POST',
+    sessionId: identity.sessionId,
+  })
+  return `Task ${task.id}: ${task.lastDispatch?.ok ? `delivery ${task.lastDispatch.mode}` : 'delivery failed'}. ${task.lastDispatch?.note || task.lastDispatch?.error || ''}`
+}
+
+async function shareKnowledge(args) {
+  const identity = requireIdentity()
+  const entry = await api('/api/knowledge', {
+    method: 'POST',
+    sessionId: identity.sessionId,
+    body: {
+      title: args?.title,
+      body: args?.body,
+      tags: args?.tags,
+      projectPath: args?.project_path,
+      always: args?.always === true,
+    },
+  })
+  return `Knowledge entry ${entry.id} saved${entry.always ? ' and pinned into relevant prompts' : ' for search and session-start context'}.`
+}
+
+async function listKnowledge(args) {
+  const identity = requireIdentity()
+  const data = await api('/api/command-center', { sessionId: identity.sessionId })
+  const query = typeof args?.query === 'string' ? args.query.trim().toLowerCase() : ''
+  const entries = (data.knowledge || [])
+    .filter((entry) => !entry.archivedAt || args?.include_archived === true)
+    .filter((entry) => !query || [entry.title, entry.body, entry.projectPath, ...(entry.tags || [])].join(' ').toLowerCase().includes(query))
+  if (!entries.length) return query ? `No knowledge matches "${query}".` : 'The shared knowledge base is empty.'
+  return entries
+    .slice(0, 30)
+    .map((entry) => `# ${entry.title} (${entry.id})\nScope: ${entry.projectPath || 'global'} · pinned: ${entry.always ? 'yes' : 'no'} · revision: ${entry.revision}\n${short(entry.body, 8000)}`)
+    .join('\n\n')
+}
+
+async function requestDecision(args) {
+  const identity = requireIdentity()
+  const decision = await api('/api/decisions', {
+    method: 'POST',
+    sessionId: identity.sessionId,
+    body: { question: args?.question, context: args?.context, taskId: args?.task_id },
+  })
+  return `Decision ${decision.id} is now waiting for the human in the command center.${decision.taskId ? ' The linked task is blocked until the answer arrives.' : ''}`
+}
+
 const TOOLS = [
   {
     name: 'list_sessions',
@@ -657,6 +814,166 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'register_preview',
+    description:
+      'Announce the port of the dev server this session is showing, so the board links it as https://<name>.<zone>. The host routes to 127.0.0.1:<port> until the registration expires (12 hours by default); call again to extend it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        port: {
+          type: 'number',
+          description: 'Loopback port the dev server listens on, e.g. 5173.',
+        },
+        name: {
+          type: 'string',
+          description: 'Optional DNS label; derived from the session name when omitted.',
+        },
+        ttl_minutes: {
+          type: 'number',
+          description: 'How long the link stays alive (5–10080 minutes).',
+        },
+        routes: {
+          type: 'array',
+          description:
+            'Optional path rules for a dev server that does not serve its own API, e.g. [{"prefix":"/api/","port":7100}]. The longest matching prefix wins; set strip:true to drop the prefix.',
+          items: {
+            type: 'object',
+            properties: {
+              prefix: { type: 'string', description: 'Path prefix, e.g. "/api/".' },
+              port: { type: 'number', description: 'Loopback port answering it.' },
+              strip: {
+                type: 'boolean',
+                description: 'Forward without the prefix, e.g. /api/health → /health.',
+              },
+            },
+            required: ['prefix', 'port'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['port'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'clear_preview',
+    description:
+      'Remove this session\'s preview registration so the board stops linking it and the router stops answering.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'get_command_center',
+    description:
+      'Read the commander, delegated tasks with declared progress and revisions, open human decisions, shared knowledge and recent human commands. The commander uses this before planning; workers use it to see exact task ids.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'create_task',
+    description:
+      'Commander only: create and assign a durable task. Assignment immediately dispatches the brief to a live worker (or queues it in the worker inbox). Workers report completion into review, never straight to done.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short outcome-oriented task title.' },
+        brief: { type: 'string', description: 'Complete context, acceptance criteria and constraints for the worker.' },
+        assignee_session_id: { type: 'string', description: 'Worker full id, short id, or name from list_sessions. Omit to leave unassigned.' },
+        priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
+        project_path: { type: 'string', description: 'Optional absolute project directory used for knowledge scoping.' },
+      },
+      required: ['title', 'brief'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'update_task',
+    description:
+      'Assignee or commander: report explicit task status, progress, a concrete note, or a result. Workers set review + progress 100 when finished; only the commander marks done after verification.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Exact task id from the assignment or get_command_center.' },
+        status: { type: 'string', enum: ['queued', 'in_progress', 'blocked', 'review', 'done', 'cancelled'] },
+        progress: { type: 'number', description: 'Whole number from 0 to 100, based on declared work rather than session idle state.' },
+        note: { type: 'string', description: 'Short concrete progress or blocker note.' },
+        result: { type: 'string', description: 'Useful final result for commander review.' },
+        expected_revision: { type: 'number', description: 'Optional revision read earlier; prevents overwriting a concurrent update.' },
+      },
+      required: ['task_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'report_status',
+    description:
+      'Commander only: post a compact report into the human command center channel. Call it right after delegating (which agents run which features, in which project) and on milestones, blockers and completions, so the human sees the state without asking.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'One-line headline, e.g. "3 agents on partner portal and admin docs".' },
+        body: { type: 'string', description: 'Short report: what is running, where, current state and what you will report next. Markdown allowed.' },
+        kind: { type: 'string', enum: ['status', 'progress', 'blocked', 'done', 'question', 'note'] },
+        project_path: { type: 'string', description: 'Optional absolute project directory this report is about.' },
+        task_ids: { type: 'array', items: { type: 'string' }, description: 'Related task ids so the report links to them.' },
+      },
+      required: ['title', 'body'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'dispatch_task',
+    description: 'Assignee or commander: deliver or retry delivery of an open task to its assigned live session.',
+    inputSchema: {
+      type: 'object',
+      properties: { task_id: { type: 'string' } },
+      required: ['task_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'share_knowledge',
+    description:
+      'Publish a durable fact or working agreement for other sessions. Global entries apply everywhere; project_path limits relevance. Commander/human entries may be pinned into every prompt; worker notes remain searchable and appear at session start.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        body: { type: 'string', description: 'Durable knowledge, not a transient status update. Never store credentials.' },
+        tags: { type: 'array', items: { type: 'string' } },
+        project_path: { type: 'string', description: 'Absolute project path, or omit for global.' },
+        always: { type: 'boolean', description: 'Pin into every relevant prompt (commander only).' },
+      },
+      required: ['title', 'body'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'list_knowledge',
+    description: 'Search full shared knowledge entries, including entries not pinned into the current prompt.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Optional case-insensitive text search.' },
+        include_archived: { type: 'boolean' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'request_decision',
+    description:
+      'Ask the human a persistent question in the command center. With task_id, the task becomes blocked and resumes automatically when the human answer is delivered.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'One clear question the human can answer.' },
+        context: { type: 'string', description: 'Concise options, trade-offs or background needed to decide.' },
+        task_id: { type: 'string', description: 'Optional assigned task to block until the answer.' },
+      },
+      required: ['question'],
+      additionalProperties: false,
+    },
+  },
 ]
 
 const HANDLERS = {
@@ -667,11 +984,23 @@ const HANDLERS = {
   shared_changes: sharedChanges,
   claim_files: claimFiles,
   release_files: releaseFiles,
+  register_preview: registerPreview,
+  clear_preview: clearPreview,
+  get_command_center: getCommandCenter,
+  create_task: createTask,
+  update_task: updateTask,
+  report_status: reportStatus,
+  dispatch_task: dispatchTask,
+  share_knowledge: shareKnowledge,
+  list_knowledge: listKnowledge,
+  request_decision: requestDecision,
 }
 
 const INSTRUCTIONS = `You are one of several Claude Code sessions on this machine, and a human watches all of them in the Claude Session Manager web UI.
 
-Use list_sessions to see your peers. Before editing files, call shared_changes and check whether another session touched or claimed the same files; review their work (git status / git diff) instead of overwriting it. Claim files with claim_files before multi-file or risky edits, and release them when done. Use send_message to leave short, actionable notes for a peer or for everyone; messages arrive on the recipient's next prompt. read_inbox shows messages addressed to you.
+Use list_sessions to see your peers. Before editing files, call shared_changes and check whether another session touched or claimed the same files; review their work (git status / git diff) instead of overwriting it. Claim files with claim_files before multi-file or risky edits, and release them when done. Use send_message to leave short, actionable notes for a peer or for everyone; messages arrive on the recipient's next prompt. read_inbox shows messages addressed to you. If you start a dev server for a preview, call register_preview with its port so the board links it.
+
+The command center has durable tasks, knowledge and human decisions. The commander uses create_task to delegate; assigned workers report explicit progress with update_task, finish in review, and call request_decision when blocked on the human. As commander, call report_status immediately after delegating (which agents run what, in which project) and again on milestones, blockers and completions — the human reads that channel instead of polling. Use get_command_center and list_knowledge for the current shared state.
 
 The human can answer your AskUserQuestion prompts from the web UI. When that happens, the tool call is denied with the answers in its reason; continue the task using those answers instead of asking again.`
 

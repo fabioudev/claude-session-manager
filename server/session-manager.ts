@@ -12,8 +12,14 @@ import type {
   LaunchSessionResult,
   MessageInput,
   PendingQuestion,
+  PreviewInput,
+  PreviewLink,
+  PreviewRegistration,
+  PromptResult,
   PublicConfig,
   QuestionAnswerInput,
+  RestartSessionResult,
+  ResumeSessionResult,
   ServerEvent,
   SessionDetail,
   SessionMessage,
@@ -21,21 +27,61 @@ import type {
   SessionStatus,
   SessionSummary,
   SessionTimeline,
+  SessionUpdate,
   SettingsPatch,
   StopSessionResult,
   TokenUsage,
 } from '../shared/types.js'
 import type { AppConfig } from './config.js'
 import { buildInjectedContext, claimConflictNote, overlapNote } from './coordination.js'
+import { dispatchDecision, wakeDecision } from './dispatch.js'
+import {
+  makePreviewLink,
+  normalizePreviewName,
+  parsePreviewPort,
+  previewUrl,
+  resolvePreview,
+} from './preview.js'
 import { estimatedCostUsd, pricingForModel } from './pricing.js'
 import { QuestionBroker, type QuestionResolution } from './questions.js'
 import { type BackgroundJob, ClaudeRegistry, type LiveSession } from './registry.js'
+import {
+  buildRestartCommand,
+  dropRootBlockedFlags,
+  isDescendant,
+  isExpectedForeground,
+  isInteractiveShell,
+  isShellCommand,
+  launcherSpec,
+  looksLikeTrustPrompt,
+  processCommandNames,
+  processEnvValue,
+  readProcess,
+  resolveLaunchSpec,
+  restartSupported,
+  shellQuote,
+  waitFor,
+} from './restart.js'
 import type { StateStore } from './state-store.js'
+import {
+  capturePane,
+  killSession,
+  newSession,
+  paneInfo,
+  paneTarget,
+  pasteText,
+  resumeSessionName,
+  sendEnter,
+  sendText,
+  sessionExists,
+} from './tmux.js'
 import { describeToolCall, questionsFromToolInput } from './transcript/parse.js'
 import { TranscriptStore, type TranscriptView } from './transcript/store.js'
+import { installedClaudeVersion, installedPluginVersion, isNewerVersion } from './updates.js'
 import {
   cleanPrompt,
   expandHome,
+  type GitInfo,
   getGitInfo,
   hashString,
   isoAt,
@@ -56,11 +102,38 @@ const MINUTE = 60 * 1000
 const RECENT_WINDOW_MS = 14 * DAY
 const LIVE_HOOK_WINDOW_MS = 30 * MINUTE
 const OVERLAP_NOTE_TTL_MS = 6 * 60 * MINUTE
+const VERSION_REFRESH_MS = 5 * MINUTE
+const AUTO_RESTART_TICK_MS = 30_000
+const AUTO_RESTART_IDLE_MS = 3 * MINUTE
+const AUTO_RESTART_SPACING_MS = 30_000
+const RESTART_COOLDOWN_MS = 10 * MINUTE
+const RESTART_SHELL_TIMEOUT_MS = 15_000
+const RESTART_START_TIMEOUT_MS = 10_000
+const RESTART_STABLE_MS = 1_500
+const RESUME_NAME_ATTEMPTS = 20
+const RESUME_OUTPUT_LINES = 40
+const MAX_PROMPT_LENGTH = 20000
+/** A tunnel address older than this is likely dead; only rules stay listed. */
+const PREVIEW_URL_MAX_AGE_MS = 24 * 60 * MINUTE
+const TRUST_PROMPT_NOTE =
+  'Claude is waiting at its workspace trust prompt; answer it in the terminal.'
 
 interface NotificationState {
   message: string
   type: string | null
   at: number
+}
+
+/**
+ * Claude Code fires Notification("idle_prompt", "Claude is waiting for your
+ * input") whenever a turn has finished and the terminal sits unattended. That is
+ * the normal resting state of a live session — the exact moment a prompt from
+ * the board can be typed — so it must not be treated like a permission prompt
+ * that only the terminal can answer. Older payloads carry no type, hence the
+ * message check as a fallback.
+ */
+export function isIdleNotification(notification: NotificationState): boolean {
+  return notification.type === 'idle_prompt' || /waiting for your input/i.test(notification.message)
 }
 
 interface Runtime {
@@ -91,6 +164,11 @@ interface Runtime {
 
 export interface SessionManagerOptions {
   claudeBin?: string
+  orchestration?: {
+    contextFor: (sessionId: string, reason: 'start' | 'prompt') => string | null
+    /** The session id the command center currently treats as its commander. */
+    commanderSessionId: () => string | null
+  }
 }
 
 function newRuntime(sessionId: string, at: number): Runtime {
@@ -182,6 +260,7 @@ export class SessionManager {
   private readonly config: AppConfig
   private readonly store: StateStore
   private readonly onEvent: (event: ServerEvent) => void
+  private readonly orchestration: SessionManagerOptions['orchestration']
   private readonly claudeBin: string
   readonly startedAt = now()
 
@@ -200,10 +279,22 @@ export class SessionManager {
 
   private recomputeTimer: NodeJS.Timeout | null = null
   private intervalTimer: NodeJS.Timeout | null = null
+  private versionTimer: NodeJS.Timeout | null = null
+  private autoRestartTimer: NodeJS.Timeout | null = null
   private recomputing = false
   private recomputeAgain = false
   private closed = false
   private lastHookAt = 0
+  private lastAutoRestartAt = 0
+  private installedClaude: string | null = null
+  private installedPlugin: string | null = null
+  private versionRefresh: Promise<void> | null = null
+  private readonly restartCooldown = new Map<string, number>()
+  private readonly restarting = new Map<string, Promise<RestartSessionResult>>()
+  private readonly autoRestartHistory = new Map<string, { at: number; signature: string }>()
+  private readonly resuming = new Set<string>()
+  /** session id -> pid whose launch command has already been captured. */
+  private readonly launchCapturedFor = new Map<string, number>()
 
   constructor(
     config: AppConfig,
@@ -214,6 +305,7 @@ export class SessionManager {
     this.config = config
     this.store = store
     this.onEvent = onEvent
+    this.orchestration = options.orchestration
     this.claudeBin = options.claudeBin ?? process.env.CSM_CLAUDE_BIN ?? 'claude'
     this.transcripts = new TranscriptStore({
       projectsDir: config.projectsDir,
@@ -241,6 +333,13 @@ export class SessionManager {
     this.registry.start(3000)
     this.intervalTimer = setInterval(() => this.scheduleRecompute(0), 4000)
     this.intervalTimer.unref?.()
+    this.versionTimer = setInterval(() => {
+      void this.refreshInstalledVersions()
+    }, VERSION_REFRESH_MS)
+    this.versionTimer.unref?.()
+    this.autoRestartTimer = setInterval(() => this.autoRestartTick(), AUTO_RESTART_TICK_MS)
+    this.autoRestartTimer.unref?.()
+    void this.refreshInstalledVersions()
   }
 
   getPublicConfig(): PublicConfig {
@@ -255,17 +354,33 @@ export class SessionManager {
       readOnly: this.config.readOnly,
       authRequired: Boolean(this.config.token),
       launchEnabled: settings.launchEnabled && !this.config.readOnly,
+      sessionLauncher: settings.sessionLauncher,
+      autoRestartSessions: settings.autoRestartSessions,
+      previewRules: settings.previewRules,
+      previewHosts: settings.previewHosts,
+      previewZone: settings.previewZone,
+      installedClaudeVersion: this.installedClaude,
+      installedPluginVersion: this.installedPlugin,
+      restartSupported: restartSupported(),
       serverStartedAt: this.startedAt,
       serverUrl: this.config.localUrl,
     }
   }
 
   updateSettings(patch: SettingsPatch): PublicConfig {
+    const wasAutoRestarting = this.store.getSettings().autoRestartSessions
     const settings = this.store.updateSettings(patch)
     if (settings.questionMode === 'terminal') {
       for (const question of this.broker.pendingQuestions()) {
         this.broker.dismiss(question.id)
       }
+    }
+    if (patch.autoRestartSessions === true) {
+      // Only re-arm the per-version guard when auto restart is switched on.
+      // Every settings save carries the current value, so clearing on each
+      // save would restart already-updated sessions again and again.
+      if (!wasAutoRestarting) this.autoRestartHistory.clear()
+      void this.refreshInstalledVersions()
     }
     const config = this.getPublicConfig()
     this.onEvent({ type: 'config', config })
@@ -285,6 +400,63 @@ export class SessionManager {
     return (
       this.summaries.has(id) || this.transcripts.has(id) || Boolean(this.store.getSessionMeta(id))
     )
+  }
+
+  /** The label a session's preview gets when it does not name one. */
+  private previewNameBase(id: string): string {
+    const live = this.liveSession(id)
+    const meta = this.store.getSessionMeta(id)
+    const candidates = [
+      live?.name,
+      meta?.customTitle,
+      live?.cwd ? path.basename(live.cwd) : null,
+      shortId(id),
+    ]
+    for (const candidate of candidates) {
+      const name = normalizePreviewName(candidate)
+      if (name) return name
+    }
+    return 'preview'
+  }
+
+  /**
+   * A session announces the port its dev server listens on. The router answers
+   * for `<name>.<zone>` until the registration expires; asking again replaces
+   * it and extends the deadline.
+   */
+  registerPreview(sessionId: string, input: PreviewInput): PreviewRegistration {
+    if (!this.store.getSettings().previewZone) {
+      throw new Error('No preview zone is configured. Set one in Settings first.')
+    }
+    const port = parsePreviewPort(input.port)
+    if (!port) throw new Error('A preview port must be an integer between 1 and 65535.')
+    const name = normalizePreviewName(input.name) ?? this.previewNameBase(sessionId)
+    const ttlMinutes =
+      typeof input.ttlMinutes === 'number' && Number.isFinite(input.ttlMinutes)
+        ? input.ttlMinutes
+        : undefined
+    const registration = this.store.registerPreview(sessionId, {
+      name,
+      port,
+      ttlMinutes,
+      routes: input.routes,
+    })
+    this.scheduleRecompute(0)
+    return registration
+  }
+
+  removePreview(sessionId: string): boolean {
+    const removed = this.store.removePreview(sessionId)
+    if (removed) this.scheduleRecompute(0)
+    return removed
+  }
+
+  listPreviews(): PreviewRegistration[] {
+    return this.store.activePreviews()
+  }
+
+  getPreviewZone(): string {
+    return this.store.getSettings().previewZone
   }
 
   getQuestions(): PendingQuestion[] {
@@ -333,7 +505,7 @@ export class SessionManager {
     }
     return {
       session: summary,
-      activities: view?.activities ?? this.store.activitiesFor(id),
+      activities: this.mergedActivities(id, view),
       messages: this.store.messagesForSession(id, 200),
       claims: this.store.claimsFor(id),
       transcriptPath: this.transcripts.pathFor(id),
@@ -477,6 +649,7 @@ export class SessionManager {
         runtime.notification = { message, type, at: clientAt }
         if (!type || /permission|idle|elicitation|waiting|input/i.test(type)) {
           runtime.working = false
+          if (isIdleNotification(runtime.notification)) void this.flushCommanderQueue(sessionId)
         }
         this.scheduleRecompute(0)
         return { output: null }
@@ -631,6 +804,129 @@ export class SessionManager {
     return { messages }
   }
 
+  /**
+   * Gives a session something to do from the board. A live, idle session gets
+   * the text typed into its own pane, so it starts working right away; anything
+   * else goes to the inbox, which the session reads on its next turn.
+   */
+  async sendPrompt(id: string, text: string): Promise<PromptResult> {
+    const body = text.trim()
+    if (!body) return { ok: false, mode: 'queued', error: 'The task is empty.' }
+    if (body.length > MAX_PROMPT_LENGTH) {
+      return {
+        ok: false,
+        mode: 'queued',
+        error: `The task is too long (max ${MAX_PROMPT_LENGTH}).`,
+      }
+    }
+    const session = this.summaries.get(id)
+    if (!session) return { ok: false, mode: 'queued', error: 'Unknown session.' }
+
+    const queue = (note: string | null): PromptResult => {
+      this.sendMessage({ body, toSessionId: id })
+      return { ok: true, mode: 'queued', note }
+    }
+    const decision = dispatchDecision({
+      session,
+      working: Boolean(this.runtimes.get(id)?.working),
+      hasQuestion: Boolean(session.question),
+      supported: restartSupported(),
+      launchEnabled: this.store.getSettings().launchEnabled,
+      readOnly: this.config.readOnly,
+    })
+    if (decision.mode === 'queued') {
+      // A background job never reads the inbox on its own, so queueing to one
+      // would strand the message. Wake it instead.
+      const woke = await this.wakeBackgroundSession(session, body)
+      if (woke) return woke
+      return queue(decision.reason)
+    }
+
+    const pane = paneTarget(session.tmux)
+    if (!pane) return queue('This session has no tmux pane to type into.')
+    const current = await paneInfo(pane)
+    if (!current?.command || isShellCommand(current.command)) {
+      return queue('The pane is at a shell, not in Claude Code.')
+    }
+    // Same rule as restart: keystrokes reach whatever holds the foreground, so
+    // only type when Claude (or its wrapper) owns it.
+    const allowed = session.pid ? await processCommandNames(session.pid) : new Set<string>()
+    if (!isExpectedForeground(current.command, allowed)) {
+      return queue('Another program is in the foreground of this pane.')
+    }
+    if (!(await pasteText(pane, body)) || !(await sendEnter(pane))) {
+      return queue('The text could not be typed into the pane.')
+    }
+    this.store.recordActivities(id, [
+      {
+        id: `prompt:${randomUUID()}`,
+        at: now(),
+        kind: 'status',
+        title: 'Task sent from the board',
+        detail: truncate(body, 200),
+      },
+    ])
+    this.scheduleRecompute(0)
+    return { ok: true, mode: 'typed', tmux: session.tmux }
+  }
+
+  /**
+   * A background session has no pane: keystrokes cannot reach it, and it never
+   * reads its inbox on its own. Resuming it with the text is the way to hand it
+   * work. `--bg --resume` keeps the conversation's id only while it is not
+   * running, so a blocked job is stopped first; a job that may still be working
+   * is left alone rather than copied.
+   */
+  private async wakeBackgroundSession(
+    session: SessionSummary,
+    body: string,
+  ): Promise<PromptResult | null> {
+    const job = this.jobFor(session.id)
+    const decision = wakeDecision({
+      session,
+      backgroundState: job?.state ?? null,
+      hasQuestion: Boolean(session.question),
+      supported: restartSupported(),
+      launchEnabled: this.store.getSettings().launchEnabled,
+      readOnly: this.config.readOnly,
+    })
+    if (!decision.wake || !job) return null
+    if (decision.stop) {
+      const stopped = await this.stopSession(session.id)
+      if (!stopped.ok) return null
+    }
+    const result = await this.launchSession({
+      cwd: session.projectPath || session.repoRoot || process.cwd(),
+      prompt: body,
+      resumeSessionId: session.id,
+    })
+    if (!result.ok) {
+      return {
+        ok: false,
+        mode: 'queued',
+        error: result.error ?? 'The background session could not be woken.',
+      }
+    }
+    this.store.recordActivities(session.id, [
+      {
+        id: `wake:${randomUUID()}`,
+        at: now(),
+        kind: 'status',
+        title: 'Woke the background session',
+        detail: truncate(body, 200),
+      },
+    ])
+    this.scheduleRecompute(0)
+    const copy = result.sessionId && result.sessionId !== session.id ? result.sessionId : null
+    return {
+      ok: true,
+      mode: 'typed',
+      note: copy
+        ? `Woke a copy of the background session (${copy}) because the original was still running.`
+        : 'Woke the background session with this text.',
+    }
+  }
+
   claimFiles(
     sessionId: string,
     input: { paths: string[]; note?: string | null; ttlMinutes?: number; release?: boolean },
@@ -733,9 +1029,15 @@ export class SessionManager {
       }
     }
 
+    // Start through the configured launcher, so a wrapper that carries auth or
+    // a default model (an Ollama launch, an env prefix) works here too.
+    const launcher = dropRootBlockedFlags(launcherSpec(settings.sessionLauncher, cwd)).spec.prefix
+    const bin = launcher[0] ?? this.claudeBin
+    const launcherArgs = launcher.slice(1)
+
     const startedAt = now()
     try {
-      const { stdout, stderr } = await execFileAsync(this.claudeBin, args, {
+      const { stdout, stderr } = await execFileAsync(bin, [...launcherArgs, ...args], {
         cwd,
         timeout: 60_000,
         maxBuffer: 4 * 1024 * 1024,
@@ -774,6 +1076,165 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Launches the commander as an interactive session in its own tmux pane.
+   *
+   * Background jobs are wrong for this job twice over: they cannot take typed
+   * input (an inbox message waits for a turn that never comes), and the daemon
+   * that owns them dies with this service's process group. A tmux pane survives
+   * both, and `sendPrompt` can type into it like with every other session.
+   */
+  async launchCommanderSession(input: LaunchSessionInput): Promise<LaunchSessionResult> {
+    const settings = this.store.getSettings()
+    if (this.config.readOnly) return { ok: false, error: 'read-only mode' }
+    if (!settings.launchEnabled) return { ok: false, error: 'Launching sessions is disabled' }
+    if (!restartSupported()) {
+      return { ok: false, error: 'Launching sessions in tmux is only supported on Linux.' }
+    }
+    const prompt = input.prompt?.trim()
+    if (!prompt) return { ok: false, error: 'Prompt must not be empty' }
+    if (prompt.length > 40_000) return { ok: false, error: 'Prompt is too long' }
+    if (input.resumeSessionId && !/^[0-9a-zA-Z_-]{8,80}$/.test(input.resumeSessionId)) {
+      return { ok: false, error: 'Invalid session id' }
+    }
+    const cwd = path.resolve(expandHome(input.cwd?.trim() || process.cwd()))
+    try {
+      if (!(await stat(cwd)).isDirectory()) {
+        return { ok: false, error: 'Working directory is not a directory' }
+      }
+    } catch {
+      return { ok: false, error: 'Working directory does not exist' }
+    }
+
+    // Run through the configured launcher, so a wrapper that carries auth or a
+    // default model works here too.
+    const spec = dropRootBlockedFlags(launcherSpec(settings.sessionLauncher, cwd)).spec
+    const argv = [...spec.prefix, ...spec.args]
+    if (input.resumeSessionId) argv.push('--resume', input.resumeSessionId)
+    else if (input.name?.trim()) argv.push('--name', input.name.trim().slice(0, 80))
+    const command = spec.cwd
+      ? `cd ${shellQuote(spec.cwd)} && ${argv.map(shellQuote).join(' ')}`
+      : argv.map(shellQuote).join(' ')
+
+    let created: { name: string; pane: string } | null = null
+    for (let attempt = 1; attempt <= RESUME_NAME_ATTEMPTS && !created; attempt += 1) {
+      const name = input.resumeSessionId
+        ? resumeSessionName(input.resumeSessionId.slice(0, 8), attempt)
+        : `csm-commander${attempt > 1 ? `-${attempt}` : ''}`
+      if (await sessionExists(name)) continue
+      const pane = await newSession(name, cwd)
+      if (pane) created = { name, pane }
+    }
+    if (!created) {
+      return { ok: false, error: 'Could not create a tmux session for the commander.' }
+    }
+    const { name, pane } = created
+    const fail = async (message: string): Promise<LaunchSessionResult> => {
+      const output = await capturePane(pane, RESUME_OUTPUT_LINES)
+      await killSession(name)
+      const tail = (output ?? '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .slice(-3)
+        .join(' ')
+      return { ok: false, error: tail ? `${message} (${tail})` : message }
+    }
+    if (!(await sendText(pane, command)) || !(await sendEnter(pane))) {
+      return await fail('Could not type the launch command into the new tmux pane.')
+    }
+    const started = await waitFor(async () => {
+      const current = await paneInfo(pane)
+      return Boolean(current?.command && !isShellCommand(current.command))
+    }, RESTART_START_TIMEOUT_MS)
+    if (!started) return await fail('Claude Code did not start in the new tmux pane.')
+    await new Promise((resolve) => setTimeout(resolve, RESTART_STABLE_MS))
+    const settled = await paneInfo(pane)
+    if (!settled?.command || isShellCommand(settled.command)) {
+      return await fail('Claude Code exited right after starting.')
+    }
+    if (looksLikeTrustPrompt((await capturePane(pane, RESUME_OUTPUT_LINES)) ?? '')) {
+      return { ok: true, output: TRUST_PROMPT_NOTE }
+    }
+    if (!(await this.submitPrompt(pane, prompt))) {
+      return await fail('Could not send the command to the commander pane.')
+    }
+
+    // A fresh launch registers its session a moment later; find it by its pane.
+    let sessionId = input.resumeSessionId ?? null
+    const deadline = Date.now() + RESTART_START_TIMEOUT_MS
+    while (!sessionId && Date.now() < deadline) {
+      await this.registry.refresh()
+      sessionId =
+        this.registry.getSnapshot().sessions.find((live) => live.tmux?.startsWith(`${name}:`))
+          ?.sessionId ?? null
+      if (!sessionId) await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    this.scheduleRecompute(0)
+    return {
+      ok: true,
+      sessionId: sessionId ?? undefined,
+      output: truncate(`tmux ${name}`, 200),
+    }
+  }
+
+  /**
+   * Pastes text into a Claude pane and submits it. A long paste can take a
+   * moment to register, so the first Enter may arrive too early and leave the
+   * text sitting in the input box; when that happened, press Enter again.
+   */
+  private async submitPrompt(pane: string, text: string): Promise<boolean> {
+    if (!(await pasteText(pane, text))) return false
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    if (!(await sendEnter(pane))) return false
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const output = (await capturePane(pane, 6)) ?? ''
+    const lastPrompt = output
+      .split('\n')
+      .map((line) => line.trim())
+      .reverse()
+      .find((line) => line.startsWith('❯'))
+    if (lastPrompt && lastPrompt !== '❯') await sendEnter(pane)
+    return true
+  }
+
+  /**
+   * Queued prompts wait for a session's next turn, and nothing would ever
+   * start one. The commander belongs to this board, so when it comes to rest
+   * the board types the queued human commands itself.
+   */
+  private async flushCommanderQueue(sessionId: string): Promise<void> {
+    if (this.orchestration?.commanderSessionId() !== sessionId) return
+    const pending = this.store
+      .pendingDeliveries(sessionId)
+      .filter((message) => message.fromSessionId === null)
+    if (!pending.length) return
+    const tmux =
+      this.summaries.get(sessionId)?.tmux ??
+      this.registry.getSnapshot().sessions.find((live) => live.sessionId === sessionId)?.tmux ??
+      null
+    const pane = paneTarget(tmux)
+    if (!pane) return
+    const ids = pending.map((message) => message.id)
+    // Mark first: the prompt hook would otherwise inject the same text again.
+    this.store.markDelivered(sessionId, ids)
+    const typed = await this.submitPrompt(pane, pending.map((message) => message.body).join('\n\n'))
+    if (!typed) {
+      this.store.unmarkDelivered(sessionId, ids)
+      return
+    }
+    this.store.recordActivities(sessionId, [
+      {
+        id: `flush:${randomUUID()}`,
+        at: now(),
+        kind: 'status',
+        title: 'Delivered queued commands',
+        detail: truncate(pending.map((message) => message.body).join(' | '), 200),
+      },
+    ])
+    this.scheduleRecompute(0)
+  }
+
   async stopSession(id: string): Promise<StopSessionResult> {
     if (this.config.readOnly) return { ok: false, error: 'read-only mode' }
     const job =
@@ -807,6 +1268,459 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Exits an idle interactive session in its tmux pane and starts it again with
+   * `--resume`, so the same conversation and session id continue under the
+   * newly installed Claude Code and plugin. Nothing is sent to a session that
+   * is working, waiting for an answer, or not in a tmux pane.
+   */
+  async restartSession(
+    id: string,
+    options: { auto?: boolean } = {},
+  ): Promise<RestartSessionResult> {
+    const running = this.restarting.get(id)
+    if (running) return running
+    const auto = options.auto === true
+    const task = this.performRestart(id, auto)
+      .catch(() => ({
+        ok: false,
+        error: 'The restart failed unexpectedly. The terminal was not touched further.',
+      }))
+      .finally(() => {
+        this.restarting.delete(id)
+      })
+    this.restarting.set(id, task)
+    return task
+  }
+
+  private async performRestart(id: string, auto: boolean): Promise<RestartSessionResult> {
+    if (this.config.readOnly) return { ok: false, error: 'Read-only mode.' }
+    if (!restartSupported()) {
+      return { ok: false, error: 'Restarting sessions in place is only supported on Linux.' }
+    }
+    const session = this.summaries.get(id)
+    if (!session) return { ok: false, error: 'Unknown session.' }
+    if (!session.live || !session.pid) {
+      return { ok: false, error: 'This session is not attached to a running process.' }
+    }
+    if (session.kind !== 'interactive') {
+      return { ok: false, error: 'Only interactive sessions can be restarted from the board.' }
+    }
+    if (!session.tmux) {
+      return {
+        ok: false,
+        error: 'This session is not running in tmux. Restart it in its terminal.',
+      }
+    }
+    if (session.question || session.status === 'waiting') {
+      return {
+        ok: false,
+        error: 'The session is waiting for input. Answer or dismiss the prompt first.',
+      }
+    }
+    // The summary map is rebuilt in the background and can lag behind the hook
+    // stream; the runtime is updated synchronously in handleHook. Trust it over
+    // the summary, otherwise a prompt submitted a moment ago could still be
+    // typed over with /exit.
+    if (this.runtimes.get(id)?.working) {
+      return { ok: false, error: 'The session is mid-turn. Restart it once the turn finishes.' }
+    }
+    if (session.status !== 'idle') {
+      return { ok: false, error: 'The session is mid-turn. Restart it once the turn finishes.' }
+    }
+
+    const at = now()
+    if ((this.restartCooldown.get(id) ?? 0) > at) {
+      return {
+        ok: false,
+        error: 'This session was restarted moments ago. Give it time to report back.',
+      }
+    }
+
+    if (auto) {
+      const stale =
+        isNewerVersion(this.installedClaude, session.version) ||
+        isNewerVersion(this.installedPlugin, session.pluginVersion)
+      if (!stale) return { ok: false, error: 'No newer version is installed.' }
+      if (at - session.lastActivityAt < AUTO_RESTART_IDLE_MS) {
+        return { ok: false, error: 'The session was active too recently.' }
+      }
+      const history = this.autoRestartHistory.get(id)
+      const signature = this.updateSignature()
+      if (history?.signature === signature) {
+        return { ok: false, error: 'This session was already restarted for this version.' }
+      }
+    }
+
+    // `--resume` fails with "No conversation found" for a session that has not
+    // written a transcript yet. Exiting such a session would leave only a
+    // shell behind, so refuse before touching the pane.
+    if (!this.transcripts.has(id) && !(await this.transcripts.ensureLoaded(id))) {
+      return {
+        ok: false,
+        error: 'This session has no conversation to resume yet. Send a prompt first.',
+      }
+    }
+
+    const pane = paneTarget(session.tmux)
+    if (!pane) return { ok: false, error: 'The tmux pane could not be identified.' }
+    const paneState = await paneInfo(pane)
+    if (!paneState) return { ok: false, error: 'The tmux pane is no longer reachable.' }
+    if (paneState.pid && !(await isDescendant(session.pid, paneState.pid))) {
+      return { ok: false, error: 'The tmux pane no longer belongs to this session.' }
+    }
+    if (isShellCommand(paneState.command)) {
+      return { ok: false, error: 'The Claude Code process already exited in this pane.' }
+    }
+    // The restart types a command into the pane after Claude exits, so a shell
+    // has to remain there. A pane that was started with the wrapper as its
+    // command would vanish instead.
+    const paneProcess = paneState.pid ? await readProcess(paneState.pid) : null
+    if (!paneProcess || !isInteractiveShell(paneProcess.argv)) {
+      return {
+        ok: false,
+        error:
+          'This tmux pane runs Claude Code without an interactive shell underneath. Start the session from a shell to restart it from here.',
+      }
+    }
+    // Keystrokes reach whatever holds the foreground, not necessarily Claude:
+    // a Ctrl-Z'd session with an editor on top would get "/exit" typed into the
+    // editor. Only proceed when the session's own process (or its wrapper) owns
+    // the foreground.
+    const allowedCommands = await processCommandNames(session.pid)
+    if (!isExpectedForeground(paneState.command, allowedCommands)) {
+      return {
+        ok: false,
+        error:
+          'Another program is in the foreground of this tmux pane. Return to Claude Code and try again.',
+      }
+    }
+
+    const launch = await resolveLaunchSpec(session.pid, session.projectPath || null)
+    if (!launch.spec) {
+      return {
+        ok: false,
+        error: launch.error ?? 'Could not reconstruct the command that started this session.',
+      }
+    }
+    // The pane's shell, not the daemon, decides whether the flag is legal here.
+    const sandbox = paneState.pid ? await processEnvValue(paneState.pid, 'IS_SANDBOX') : null
+    const rebuilt = dropRootBlockedFlags(launch.spec, {
+      ...process.env,
+      ...(sandbox !== null ? { IS_SANDBOX: sandbox } : {}),
+    })
+    const command = buildRestartCommand(rebuilt.spec, session.id)
+    const droppedNote = rebuilt.dropped.length
+      ? ' Left out --dangerously-skip-permissions, which Claude Code refuses under root.'
+      : ''
+
+    // A person may have submitted a prompt while the process was being read.
+    const latest = this.summaries.get(id)
+    if (this.runtimes.get(id)?.working || latest?.status !== 'idle' || latest.question) {
+      return { ok: false, error: 'The session started working. Try again when it is idle.' }
+    }
+
+    if (!(await sendText(pane, '/exit'))) {
+      return { ok: false, error: 'Could not type into the tmux pane.' }
+    }
+    if (!(await sendEnter(pane))) {
+      return { ok: false, error: 'Could not press Enter in the tmux pane.' }
+    }
+    const returned = await waitFor(async () => {
+      const current = await paneInfo(pane)
+      return Boolean(current?.command && isShellCommand(current.command))
+    }, RESTART_SHELL_TIMEOUT_MS)
+    if (!returned) {
+      return {
+        ok: false,
+        error:
+          'The session did not return to a shell. It may be waiting at a prompt; nothing was relaunched.',
+      }
+    }
+
+    if (!(await sendText(pane, command))) {
+      return { ok: false, error: 'Could not type the restart command into the tmux pane.' }
+    }
+    if (!(await sendEnter(pane))) {
+      return { ok: false, error: 'Could not press Enter for the restart command.' }
+    }
+    const started = await waitFor(async () => {
+      const current = await paneInfo(pane)
+      return Boolean(current?.command && !isShellCommand(current.command))
+    }, RESTART_START_TIMEOUT_MS)
+    if (!started) {
+      return {
+        ok: false,
+        error:
+          'The restart command was typed but Claude Code did not start. Check the terminal for an error.',
+      }
+    }
+    // A crash on startup also looks like "the process is running" for a moment.
+    // Make sure Claude Code stays up before reporting success.
+    await new Promise((resolve) => setTimeout(resolve, RESTART_STABLE_MS))
+    const settled = await paneInfo(pane)
+    if (!settled?.command || isShellCommand(settled.command)) {
+      return {
+        ok: false,
+        error:
+          'Claude Code exited right after the restart command. Check the terminal for an error.',
+      }
+    }
+
+    const finishedAt = now()
+    this.restartCooldown.set(id, finishedAt + RESTART_COOLDOWN_MS)
+    if (auto) {
+      this.autoRestartHistory.set(id, {
+        at: finishedAt,
+        signature: this.updateSignature(),
+      })
+    }
+    const detail = this.updateDetail(session)
+    this.store.recordActivities(id, [
+      {
+        id: `restart:${randomUUID()}`,
+        at: finishedAt,
+        kind: 'status',
+        title: detail ? 'Restarted to load an installed update' : 'Session restarted',
+        detail: detail ?? undefined,
+      },
+    ])
+    this.scheduleRecompute(0)
+    return {
+      ok: true,
+      output: `${detail ? `Restarted. ${detail}.` : 'Restarted the session.'}${droppedNote.trim()}`,
+    }
+  }
+
+  /**
+   * Starts an ended session again in a new tmux session with `--resume`, using
+   * the command that originally started it. That command is captured while the
+   * session is live, because a wrapper (an Ollama launch, an env prefix) can
+   * carry the authentication and model flags a plain `claude` would lack. A
+   * session the daemon never saw live reuses the launcher from the settings,
+   * which defaults to `claude`.
+   */
+  async resumeSession(id: string): Promise<ResumeSessionResult> {
+    if (this.config.readOnly) return { ok: false, error: 'Read-only mode.' }
+    if (!restartSupported()) {
+      return { ok: false, error: 'Resuming sessions in tmux is only supported on Linux.' }
+    }
+    if (!this.store.getSettings().launchEnabled) {
+      return { ok: false, error: 'Launching sessions is disabled in the settings.' }
+    }
+    const session = this.summaries.get(id)
+    if (!session) return { ok: false, error: 'Unknown session.' }
+    const liveNow = this.registry.getSnapshot().sessions.some((live) => live.sessionId === id)
+    if (session.live || liveNow) {
+      return { ok: false, error: 'This session is still running. Use Restart to load an update.' }
+    }
+    if (this.resuming.has(id)) {
+      return { ok: false, error: 'This session is already being resumed.' }
+    }
+    // Prefer the command captured while the session ran: it carries the
+    // wrapper, model and auth flags. Sessions the daemon only ever saw in a
+    // transcript fall back to the launcher configured in the settings.
+    const spec =
+      this.store.getLaunchSpec(id) ??
+      launcherSpec(
+        this.store.getSettings().sessionLauncher,
+        session.projectPath || session.repoRoot || null,
+      )
+    if (!this.transcripts.has(id) && !(await this.transcripts.ensureLoaded(id))) {
+      return { ok: false, error: 'This session has no conversation to resume.' }
+    }
+    const cwd = spec.cwd ?? (session.projectPath || null)
+
+    this.resuming.add(id)
+    try {
+      let created: { name: string; pane: string } | null = null
+      for (let attempt = 1; attempt <= RESUME_NAME_ATTEMPTS && !created; attempt += 1) {
+        const name = resumeSessionName(session.shortId, attempt)
+        if (await sessionExists(name)) continue
+        const pane = await newSession(name, cwd)
+        if (pane) created = { name, pane }
+      }
+      if (!created) {
+        return { ok: false, error: 'Could not create a tmux session for the resume.' }
+      }
+      const { name, pane } = created
+      // A new pane inherits the tmux server's env, not the daemon's. That decides
+      // whether the captured permission flag is legal here.
+      const shellPid = (await paneInfo(pane))?.pid ?? null
+      const sandbox = shellPid ? await processEnvValue(shellPid, 'IS_SANDBOX') : null
+      const rebuilt = dropRootBlockedFlags(
+        { ...spec, cwd },
+        {
+          ...process.env,
+          ...(sandbox !== null ? { IS_SANDBOX: sandbox } : {}),
+        },
+      )
+      const command = buildRestartCommand(rebuilt.spec, id)
+      const droppedNote = rebuilt.dropped.length
+        ? ' Left out --dangerously-skip-permissions, which Claude Code refuses under root.'
+        : ''
+      const fail = async (message: string): Promise<ResumeSessionResult> => {
+        const output = await capturePane(pane, RESUME_OUTPUT_LINES)
+        await killSession(name)
+        const tail = (output ?? '')
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .slice(-3)
+          .join(' ')
+        return { ok: false, error: tail ? `${message} (${tail})` : message }
+      }
+      if (!(await sendText(pane, command))) {
+        return await fail('Could not type the resume command into the new tmux pane.')
+      }
+      if (!(await sendEnter(pane))) {
+        return await fail('Could not press Enter in the new tmux pane.')
+      }
+      const started = await waitFor(async () => {
+        const current = await paneInfo(pane)
+        return Boolean(current?.command && !isShellCommand(current.command))
+      }, RESTART_START_TIMEOUT_MS)
+      if (!started) {
+        return await fail('Claude Code did not start in the new tmux pane.')
+      }
+      await new Promise((resolve) => setTimeout(resolve, RESTART_STABLE_MS))
+      const settled = await paneInfo(pane)
+      if (!settled?.command || isShellCommand(settled.command)) {
+        return await fail('Claude Code exited right after starting.')
+      }
+      // An untrusted workspace stops Claude at its safety prompt. Only the
+      // person can answer that, so say where the session is stuck instead of
+      // reporting a clean start.
+      const trustPrompt = looksLikeTrustPrompt((await capturePane(pane, RESUME_OUTPUT_LINES)) ?? '')
+      const note = trustPrompt ? TRUST_PROMPT_NOTE : undefined
+
+      this.store.recordActivities(id, [
+        {
+          id: `resume:${randomUUID()}`,
+          at: now(),
+          kind: 'status',
+          title: 'Session resumed in a new tmux session',
+          detail: `tmux ${name}${droppedNote}${note ? ` ${note}` : ''}`,
+        },
+      ])
+      void this.registry.refresh().finally(() => this.scheduleRecompute(0))
+      this.scheduleRecompute(0)
+      return { ok: true, tmux: name, ...(note ? { note } : {}) }
+    } finally {
+      this.resuming.delete(id)
+    }
+  }
+
+  /**
+   * Remembers how a live session was launched, so it can be resumed after it
+   * ends. Reading /proc happens once per process, not on every recompute.
+   */
+  private captureLaunchSpec(session: SessionSummary): void {
+    if (!session.live || !session.pid || session.kind !== 'interactive') return
+    if (this.launchCapturedFor.get(session.id) === session.pid) return
+    this.launchCapturedFor.set(session.id, session.pid)
+    void resolveLaunchSpec(session.pid, session.projectPath || null).then((launch) => {
+      if (launch.spec) this.store.setLaunchSpec(session.id, launch.spec)
+    })
+  }
+
+  private updateSignature(): string {
+    return `${this.installedClaude ?? '-'}|${this.installedPlugin ?? '-'}`
+  }
+
+  private sessionUpdate(input: {
+    version: string | null
+    pluginVersion: string | null
+    status: SessionStatus
+    question: PendingQuestion | null
+    live: LiveSession | null
+    liveFlag: boolean
+    job: BackgroundJob | null
+  }): SessionUpdate {
+    const claude = isNewerVersion(this.installedClaude, input.version)
+    const plugin = isNewerVersion(this.installedPlugin, input.pluginVersion)
+    const restartable =
+      !this.config.readOnly &&
+      restartSupported() &&
+      input.liveFlag &&
+      input.live?.kind === 'interactive' &&
+      Boolean(input.live?.pid) &&
+      Boolean(input.live?.tmux) &&
+      !input.job &&
+      input.status === 'idle' &&
+      !input.question
+    return { available: claude || plugin, claude, plugin, restartable }
+  }
+
+  private updateDetail(session: SessionSummary): string | null {
+    const parts: string[] = []
+    if (isNewerVersion(this.installedClaude, session.version)) {
+      parts.push(`Claude Code ${session.version ?? 'unknown'} → ${this.installedClaude}`)
+    }
+    if (isNewerVersion(this.installedPlugin, session.pluginVersion)) {
+      parts.push(`plugin ${session.pluginVersion ?? 'unknown'} → ${this.installedPlugin}`)
+    }
+    return parts.join(', ') || null
+  }
+
+  private autoRestartTick(): void {
+    if (this.closed) return
+    const settings = this.store.getSettings()
+    if (this.config.readOnly || !settings.autoRestartSessions || !restartSupported()) return
+    const at = now()
+    if (at - this.lastAutoRestartAt < AUTO_RESTART_SPACING_MS) return
+    const signature = this.updateSignature()
+    const candidates = [...this.summaries.values()].filter((session) => {
+      if (!session.update.available || !session.update.restartable) return false
+      if (!session.live || session.kind !== 'interactive' || !session.tmux || !session.pid) {
+        return false
+      }
+      if (session.status !== 'idle' || session.question) return false
+      if (this.runtimes.get(session.id)?.working) return false
+      if (at - session.lastActivityAt < AUTO_RESTART_IDLE_MS) return false
+      if ((this.restartCooldown.get(session.id) ?? 0) > at) return false
+      const history = this.autoRestartHistory.get(session.id)
+      if (history?.signature === signature) return false
+      return true
+    })
+    if (!candidates.length) return
+    candidates.sort((left, right) => left.lastActivityAt - right.lastActivityAt)
+    const target = candidates[0]
+    if (!target) return
+    this.lastAutoRestartAt = at
+    void this.restartSession(target.id, { auto: true })
+      .then((result) => {
+        if (!result.ok) this.restartCooldown.set(target.id, now() + RESTART_COOLDOWN_MS)
+      })
+      .catch(() => {
+        this.restartCooldown.set(target.id, now() + RESTART_COOLDOWN_MS)
+      })
+  }
+
+  private refreshInstalledVersions(): Promise<void> {
+    if (this.versionRefresh) return this.versionRefresh
+    const task = (async () => {
+      const [claude, plugin] = await Promise.all([
+        installedClaudeVersion(this.claudeBin),
+        installedPluginVersion(this.config.claudeDir),
+      ])
+      if (this.closed) return
+      const changed = claude !== this.installedClaude || plugin !== this.installedPlugin
+      this.installedClaude = claude
+      this.installedPlugin = plugin
+      if (changed) {
+        this.onEvent({ type: 'config', config: this.getPublicConfig() })
+        this.scheduleRecompute(0)
+      }
+    })()
+      .catch(() => undefined)
+      .finally(() => {
+        this.versionRefresh = null
+      })
+    this.versionRefresh = task
+    return task
+  }
+
   async close(): Promise<void> {
     this.closed = true
     if (this.recomputeTimer) {
@@ -816,6 +1730,14 @@ export class SessionManager {
     if (this.intervalTimer) {
       clearInterval(this.intervalTimer)
       this.intervalTimer = null
+    }
+    if (this.versionTimer) {
+      clearInterval(this.versionTimer)
+      this.versionTimer = null
+    }
+    if (this.autoRestartTimer) {
+      clearInterval(this.autoRestartTimer)
+      this.autoRestartTimer = null
     }
     for (const question of this.broker.pendingQuestions()) {
       this.broker.cancelForSession(question.sessionId, 'terminal')
@@ -948,6 +1870,7 @@ export class SessionManager {
       if (!view && !live && !job && !runtime) continue
       if (runtime && at - runtime.lastHookAt >= 7 * DAY) continue
       const summary = await this.buildSummary(id, view, live, job, runtime, at, overlaps)
+      this.captureLaunchSpec(summary)
       next.set(id, summary)
     }
 
@@ -1004,6 +1927,20 @@ export class SessionManager {
     return this.registry.getSnapshot().sessions.find((session) => session.sessionId === id) ?? null
   }
 
+  /**
+   * Transcript activities are authoritative; the store only holds events the
+   * daemon itself made, such as a restart. Merge those in so they are visible.
+   */
+  private mergedActivities(id: string, view: TranscriptView | null): ActivityEvent[] {
+    const transcript = view?.activities ?? []
+    const stored = this.store.activitiesFor(id)
+    if (!stored.length) return transcript
+    const known = new Set(transcript.map((event) => event.id))
+    const extra = stored.filter((event) => !known.has(event.id))
+    if (!extra.length) return transcript
+    return [...transcript, ...extra].sort((a, b) => a.at - b.at)
+  }
+
   private jobFor(id: string): BackgroundJob | null {
     return this.registry.getSnapshot().jobs.find((job) => job.sessionId === id) ?? null
   }
@@ -1046,7 +1983,9 @@ export class SessionManager {
     const jobBlocked = job?.state === 'blocked'
     const jobFinished = job?.state === 'done' || job?.state === 'failed' || job?.state === 'stopped'
     const liveFlag = Boolean(live) || jobWorking
-    const notificationWaiting = Boolean(runtime?.notification) && !runtime?.working
+    const notification = runtime?.notification ?? null
+    const notificationWaiting =
+      notification !== null && !runtime?.working && !isIdleNotification(notification)
 
     let status: SessionStatus
     if (
@@ -1090,6 +2029,7 @@ export class SessionManager {
       projectPath && (Boolean(live) || at - lastActivityAt < 2 * 60 * MINUTE)
         ? await getGitInfo(projectPath)
         : null
+    const preview = this.previewFor(id, view, projectPath, git)
 
     const titleCandidate = this.pickTitle(id, view, live, job, meta?.customTitle ?? null)
     const mission = this.sessionMission(id, view, live, job, meta?.customTitle ?? null)
@@ -1100,8 +2040,33 @@ export class SessionManager {
       view?.summary ??
       null
 
+    const version = live?.version ?? view?.version ?? null
+    const pluginVersion = runtime?.pluginVersion ?? null
+    const update = this.sessionUpdate({
+      version,
+      pluginVersion,
+      status,
+      question,
+      live,
+      liveFlag,
+      job,
+    })
     const tokens = this.tokenUsage(view, model)
-    const notification = runtime?.notification ?? null
+    // Resuming replays the captured launcher when there is one and otherwise
+    // the launcher from the settings, so a plain transcript-only session can
+    // be resumed too. The UI says which of the two it will use.
+    const resumeAllowed =
+      !liveFlag &&
+      !job &&
+      !this.config.readOnly &&
+      restartSupported() &&
+      this.store.getSettings().launchEnabled &&
+      (this.transcripts.has(id) || Boolean(view))
+    const resumableVia: 'captured' | 'launcher' | null = resumeAllowed
+      ? this.store.getLaunchSpec(id)
+        ? 'captured'
+        : 'launcher'
+      : null
     const currentActivity = this.currentActivity(
       status,
       runtime,
@@ -1136,6 +2101,7 @@ export class SessionManager {
         git?.branch ??
         null,
       gitRemoteUrl: git?.remoteUrl ?? null,
+      preview,
       kind: live?.kind ?? (job ? 'background' : 'unknown'),
       status,
       statusDetail,
@@ -1147,7 +2113,11 @@ export class SessionManager {
       lastActivityAt: lastActivityAt || at,
       endedAt,
       model,
-      version: live?.version ?? view?.version ?? null,
+      version,
+      pluginVersion,
+      update,
+      resumable: resumableVia !== null,
+      resumableVia,
       tokens,
       live: liveFlag,
       pid: live?.pid ?? null,
@@ -1161,10 +2131,59 @@ export class SessionManager {
       ).length,
       pinned: meta?.pinned ?? false,
       archived: meta?.archived ?? false,
-      timeline: buildTimeline(view?.activities ?? [], question, notification, job, at),
+      timeline: buildTimeline(this.mergedActivities(id, view), question, notification, job, at),
       messageCount: view?.messageCount ?? 0,
       source: runtime && hookFresh ? 'hook' : live ? 'registry' : job ? 'background' : 'transcript',
     }
+  }
+
+  /**
+   * A link to the session's preview. A registration the session made through
+   * the preview router wins: it is live, and the router answers for that host.
+   * Otherwise a Settings rule is matched against the project path and
+   * repository names. Without a rule, the newest URL a tool printed in the
+   * last day whose host is a configured preview host is used.
+   */
+  private previewFor(
+    id: string,
+    view: TranscriptView | null,
+    projectPath: string,
+    git: GitInfo | null,
+  ): PreviewLink | null {
+    const settings = this.store.getSettings()
+    if (settings.previewZone) {
+      const registered = this.store.previewFor(id)
+      if (registered) {
+        const link = makePreviewLink(
+          previewUrl(registered.name, settings.previewZone),
+          'registered',
+          registered.createdAt,
+        )
+        if (link) return link
+      }
+    }
+    if (settings.previewRules.length === 0 && settings.previewHosts.length === 0) return null
+    const values = [
+      projectPath,
+      view?.cwd ?? '',
+      git?.repoRoot ?? '',
+      git?.repoName ?? '',
+      projectPath ? path.basename(projectPath) : '',
+    ]
+    // Only tool output is scanned. A session's own prose mentions URLs for many
+    // reasons — a peer's tunnel, a documentation link, a command in a prompt —
+    // and attaching one of those as "the preview" would be a lie.
+    const cutoff = now() - PREVIEW_URL_MAX_AGE_MS
+    const snippets = (view?.recentToolResults ?? [])
+      .filter((result) => result.at >= cutoff)
+      .map((result) => ({ text: result.text, at: result.at }))
+      .sort((a, b) => b.at - a.at)
+    return resolvePreview({
+      rules: settings.previewRules,
+      hosts: settings.previewHosts,
+      values,
+      snippets,
+    })
   }
 
   private sessionMission(
@@ -1472,7 +2491,9 @@ export class SessionManager {
       )
       this.scheduleRecompute(150)
     }
-    return context
+    const commandContext = this.orchestration?.contextFor(sessionId, reason) ?? null
+    if (context && commandContext) return `${context}\n${commandContext}`
+    return context ?? commandContext
   }
 
   /** Used by the doctor command and tests. */

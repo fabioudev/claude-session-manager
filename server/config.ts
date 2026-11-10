@@ -19,6 +19,13 @@ export interface AppConfig {
   openBrowser: boolean
   logLevel: string
   localUrl: string
+  /** Port of the Host→dev-server router; 0 disables it. */
+  previewPort: number
+  previewBind: string
+  /** Shared secret the TLS proxy must send to the router. */
+  previewSecret: string | null
+  /** Login password for previews; null leaves them open. */
+  previewPassword: string | null
 }
 
 export class ConfigError extends Error {}
@@ -54,6 +61,10 @@ export function parseConfig(
   let readOnly = env.CSM_READ_ONLY === '1' || env.CSM_READ_ONLY === 'true'
   let openBrowser = false
   let logLevel = env.CSM_LOG_LEVEL ?? 'info'
+  const previewPort = Number(env.CSM_PREVIEW_PORT ?? 8090)
+  const previewBind = env.CSM_PREVIEW_BIND ?? '127.0.0.1'
+  const previewSecret = env.CSM_PREVIEW_SECRET?.trim() || null
+  const previewPassword = env.CSM_PREVIEW_PASSWORD?.trim() || null
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
@@ -101,6 +112,10 @@ export function parseConfig(
     throw new ConfigError(`Invalid port: ${port}`)
   }
   if (!host.trim()) throw new ConfigError('Host must not be empty')
+  if (!Number.isInteger(previewPort) || previewPort < 0 || previewPort > 65535) {
+    throw new ConfigError(`Invalid preview port: ${previewPort}`)
+  }
+  if (!previewBind.trim()) throw new ConfigError('Preview bind address must not be empty')
 
   const loopbackHosts = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
   const wildcardHosts = new Set(['0.0.0.0', '::', '[::]'])
@@ -109,6 +124,14 @@ export function parseConfig(
   if (!isLoopback && !token && !allowInsecure) {
     throw new ConfigError(
       'Refusing to bind a non-loopback address without an API token. Pass --token <secret> or --allow-insecure if a trusted reverse proxy protects the app.',
+    )
+  }
+  if (previewPassword !== null && previewPassword.length < 8) {
+    throw new ConfigError('CSM_PREVIEW_PASSWORD must be at least 8 characters long.')
+  }
+  if (previewPort > 0 && !loopbackHosts.has(previewBind) && !previewSecret) {
+    throw new ConfigError(
+      'Refusing to expose the preview router without a secret. Pass CSM_PREVIEW_SECRET or bind it to loopback.',
     )
   }
 
@@ -135,6 +158,10 @@ export function parseConfig(
     readOnly,
     openBrowser,
     logLevel,
+    previewPort,
+    previewBind,
+    previewSecret,
+    previewPassword,
     localUrl: `http://${isLoopback || isWildcard ? 'localhost' : urlHost(host)}:${port}`,
   }
 }
@@ -162,6 +189,14 @@ Options:
 Environment:
   CSM_HOST, CSM_PORT, CSM_DATA_DIR, CSM_CLAUDE_DIR, CSM_TOKEN,
   CSM_READ_ONLY, CSM_ALLOW_INSECURE, CSM_LOG_LEVEL
+
+Preview router (maps <name>.<zone> to a session's dev server):
+  CSM_PREVIEW_PORT      Loopback port of the router (default 8090, 0 disables)
+  CSM_PREVIEW_BIND      Bind address (default 127.0.0.1)
+  CSM_PREVIEW_SECRET    Shared secret the TLS proxy must send; required when
+                        the router is not bound to loopback
+  CSM_PREVIEW_PASSWORD  When set, every preview shows a login page first; the
+                        session cookie then carries pages, assets, XHR and HMR
 
 The plugin talks to http://127.0.0.1:<port> and reads
 <data-dir>/client.json for the URL and optional token.

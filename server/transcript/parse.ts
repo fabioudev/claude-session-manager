@@ -40,6 +40,8 @@ export interface TranscriptParseState {
   lastToolName: string | null
   lastToolText: string | null
   lastToolAt: number | null
+  /** Newest tool result texts, truncated; used to find a preview URL. */
+  recentToolResults: RecentToolResult[]
   lastActivityAt: number | null
   startedAt: number | null
   promptCount: number
@@ -63,6 +65,12 @@ export interface TranscriptParseState {
 
 const MAX_ACTIVITIES = 400
 const MAX_SEEN = 20_000
+const MAX_RECENT_TOOL_RESULTS = 8
+
+export interface RecentToolResult {
+  text: string
+  at: number
+}
 
 export function createTranscriptState(): TranscriptParseState {
   return {
@@ -84,6 +92,7 @@ export function createTranscriptState(): TranscriptParseState {
     lastToolName: null,
     lastToolText: null,
     lastToolAt: null,
+    recentToolResults: [],
     lastActivityAt: null,
     startedAt: null,
     promptCount: 0,
@@ -525,6 +534,18 @@ export function applyTranscriptLine(
       }
       if (!sidechain && toolUseId) {
         state.lastToolAt = timestamp
+        // A dev server prints its address in the command output. Keep the last
+        // few results so a later tool call does not bury that line.
+        const text = textOf(block)
+        if (text.trim()) {
+          state.recentToolResults.push({ text: truncate(text, 2000), at: timestamp })
+          if (state.recentToolResults.length > MAX_RECENT_TOOL_RESULTS) {
+            state.recentToolResults.splice(
+              0,
+              state.recentToolResults.length - MAX_RECENT_TOOL_RESULTS,
+            )
+          }
+        }
       }
       return
     }

@@ -1,7 +1,8 @@
-import { LayoutGrid, MessagesSquare, Settings2, WifiOff } from 'lucide-react'
+import { Command, LayoutGrid, MessagesSquare, Settings2, WifiOff } from 'lucide-react'
 import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { activeCount, boardBuckets } from '../lib/board'
+import { offlineAssignments, visibleQuestions } from '../lib/command'
 import { relativeTime } from '../lib/format'
 import { type ConnectionState, useLive } from '../lib/live'
 import { BrandLockup } from './Brand'
@@ -25,7 +26,8 @@ function connectionDot(state: ConnectionState): string {
 }
 
 export function AppShell() {
-  const { sessions, config, connection, lastEventAt, reconnect, ready } = useLive()
+  const { sessions, questions, commandCenter, config, connection, lastEventAt, reconnect, ready } =
+    useLive()
   const location = useLocation()
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: navigating to another route is the whole point of this effect.
@@ -34,9 +36,16 @@ export function AppShell() {
   }, [location.pathname])
 
   const buckets = boardBuckets(sessions)
-  const needs = buckets.needs.length
+  const durableNeeds = commandCenter.decisions.filter((decision) => !decision.resolvedAt).length
+  const offlineCount = offlineAssignments(commandCenter.tasks, sessions).length
+  const commandNeeds = visibleQuestions(questions, sessions).length + durableNeeds + offlineCount
+  const commandActive = commandCenter.tasks.filter(
+    (task) => task.status !== 'done' && task.status !== 'cancelled',
+  ).length
+  const needs = buckets.needs.length + durableNeeds + offlineCount
   const active = activeCount(buckets)
-  const boardBadge = needs > 0 ? needs : active
+  const commandBadge = commandNeeds > 0 ? commandNeeds : commandActive
+  const boardBadge = buckets.needs.length > 0 ? buckets.needs.length : active
   const unread = sessions.reduce((sum, session) => sum + session.unreadMessages, 0)
   const offline = ready && connection === 'offline'
 
@@ -45,13 +54,29 @@ export function AppShell() {
       <ul className="nav-list">
         <li>
           <NavLink to="/" end className={navClass}>
-            <LayoutGrid className="nav-icon" size={15} aria-hidden="true" />
-            <span>Board</span>
+            <Command className="nav-icon" size={15} aria-hidden="true" />
+            <span>Command</span>
             <span
-              className={needs > 0 ? 'nav-count needs' : 'nav-count'}
+              className={commandNeeds > 0 ? 'nav-count needs' : 'nav-count'}
               title={
-                needs > 0
-                  ? `${needs} session${needs === 1 ? '' : 's'} need you`
+                commandNeeds > 0
+                  ? `${commandNeeds} items need you`
+                  : `${commandActive} active tasks`
+              }
+            >
+              {commandBadge > 0 ? commandBadge : ''}
+            </span>
+          </NavLink>
+        </li>
+        <li>
+          <NavLink to="/sessions" className={navClass}>
+            <LayoutGrid className="nav-icon" size={15} aria-hidden="true" />
+            <span>Sessions</span>
+            <span
+              className={buckets.needs.length > 0 ? 'nav-count needs' : 'nav-count'}
+              title={
+                buckets.needs.length > 0
+                  ? `${buckets.needs.length} sessions need you`
                   : `${active} active`
               }
             >

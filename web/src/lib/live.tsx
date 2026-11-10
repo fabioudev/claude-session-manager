@@ -1,4 +1,10 @@
-import type { PendingQuestion, PublicConfig, ServerEvent, SessionSummary } from '@shared/types'
+import type {
+  CommandCenterSnapshot,
+  PendingQuestion,
+  PublicConfig,
+  ServerEvent,
+  SessionSummary,
+} from '@shared/types'
 import {
   createContext,
   type ReactNode,
@@ -16,6 +22,7 @@ export type ConnectionState = 'connecting' | 'live' | 'polling' | 'offline'
 interface LiveContextValue {
   sessions: SessionSummary[]
   questions: PendingQuestion[]
+  commandCenter: CommandCenterSnapshot
   config: PublicConfig | null
   ready: boolean
   unauthorized: boolean
@@ -27,6 +34,15 @@ interface LiveContextValue {
   refresh: () => Promise<void>
   connect: () => Promise<boolean>
   reconnect: () => void
+}
+
+const EMPTY_COMMAND_CENTER: CommandCenterSnapshot = {
+  commanderSessionId: null,
+  tasks: [],
+  knowledge: [],
+  decisions: [],
+  commands: [],
+  updates: [],
 }
 
 const LiveContext = createContext<LiveContextValue | null>(null)
@@ -53,6 +69,7 @@ function withSessionQuestion(list: PendingQuestion[], session: SessionSummary): 
 export function LiveProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [questions, setQuestions] = useState<PendingQuestion[]>([])
+  const [commandCenter, setCommandCenter] = useState<CommandCenterSnapshot>(EMPTY_COMMAND_CENTER)
   const [config, setConfig] = useState<PublicConfig | null>(null)
   const [ready, setReady] = useState(false)
   const [unauthorized, setUnauthorized] = useState(false)
@@ -69,10 +86,15 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     setBootError(null)
     try {
       const nextConfig = await api.config()
-      const [sessionsResult, questionsResult] = await Promise.all([api.sessions(), api.questions()])
+      const [sessionsResult, questionsResult, nextCommandCenter] = await Promise.all([
+        api.sessions(),
+        api.questions(),
+        api.commandCenter(),
+      ])
       setConfig(nextConfig)
       setSessions(sessionsResult.sessions)
       setQuestions(questionsResult.questions)
+      setCommandCenter(nextCommandCenter)
       setUnauthorized(false)
       setReady(true)
       setConnection('connecting')
@@ -92,14 +114,16 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     try {
-      const [sessionsResult, questionsResult, nextConfig] = await Promise.all([
+      const [sessionsResult, questionsResult, nextConfig, nextCommandCenter] = await Promise.all([
         api.sessions(),
         api.questions(),
         api.config(),
+        api.commandCenter(),
       ])
       setSessions(sessionsResult.sessions)
       setQuestions(questionsResult.questions)
       setConfig(nextConfig)
+      setCommandCenter(nextCommandCenter)
       setUnauthorized(false)
       setError(null)
       if (fallbackRef.current) {
@@ -193,6 +217,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       if (type === 'hello' && payload.type === 'hello') {
         setSessions(payload.sessions)
         setQuestions(payload.questions)
+        setCommandCenter(payload.commandCenter)
         setConfig(payload.config)
         return
       }
@@ -223,6 +248,10 @@ export function LiveProvider({ children }: { children: ReactNode }) {
         setMessageTick((value) => value + 1)
         return
       }
+      if (payload.type === 'command-center') {
+        setCommandCenter(payload.commandCenter)
+        return
+      }
       if (payload.type === 'config') {
         setConfig(payload.config)
       }
@@ -235,6 +264,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       'question',
       'question.resolved',
       'message',
+      'command-center',
       'config',
       'ping',
     ]
@@ -274,6 +304,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     () => ({
       sessions,
       questions,
+      commandCenter,
       config,
       ready,
       unauthorized,
@@ -289,6 +320,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     [
       sessions,
       questions,
+      commandCenter,
       config,
       ready,
       unauthorized,

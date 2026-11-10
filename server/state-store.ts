@@ -5,15 +5,39 @@ import type {
   FileClaim,
   FileTouch,
   Overlap,
+  PreviewRegistration,
+  PreviewRule,
   SessionMessage,
   SettingsPatch,
 } from '../shared/types.js'
+import {
+  MAX_PREVIEW_HOSTS,
+  MAX_PREVIEW_NAME_LENGTH,
+  MAX_PREVIEW_REGISTRATIONS,
+  MAX_PREVIEW_RULES,
+  normalizePreviewHost,
+  normalizePreviewName,
+  normalizePreviewRoutes,
+  normalizePreviewRule,
+  normalizePreviewZone,
+  parsePreviewPort,
+} from './preview.js'
+import type { LaunchSpec } from './restart.js'
 import { atomicWriteFile, ensureDir, now } from './util.js'
 
 export interface Settings {
   questionMode: 'auto' | 'web' | 'terminal'
   questionTimeoutSeconds: number
   launchEnabled: boolean
+  /** Command that starts Claude Code, used to resume sessions captured without one. */
+  sessionLauncher: string
+  autoRestartSessions: boolean
+  /** Project patterns mapped to the address their preview is served on. */
+  previewRules: PreviewRule[]
+  /** Host suffixes recognised as a preview URL in session output. */
+  previewHosts: string[]
+  /** Zone registered previews live under; empty disables the preview router. */
+  previewZone: string
 }
 
 export interface SessionMeta {
@@ -25,6 +49,12 @@ export interface SessionMeta {
   lastSeenAt: number
   lastActivityAt: number
   endedAt: number | null
+  /**
+   * How the session was started, captured while it was live so it can be
+   * resumed later. This holds argv tokens (never resolved secrets) from the
+   * process table.
+   */
+  launch: LaunchSpec | null
   activities: ActivityEvent[]
 }
 
@@ -35,12 +65,18 @@ interface PersistedState {
   messages: SessionMessage[]
   claims: FileClaim[]
   fileTouches: Record<string, FileTouch[]>
+  previews: PreviewRegistration[]
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   questionMode: 'auto',
   questionTimeoutSeconds: 90,
   launchEnabled: true,
+  sessionLauncher: '',
+  autoRestartSessions: false,
+  previewRules: [],
+  previewHosts: [],
+  previewZone: '',
 }
 
 const MAX_ACTIVITIES_PER_SESSION = 160
@@ -49,6 +85,10 @@ const MAX_MESSAGES = 1000
 const ENDED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 const SAVE_DEBOUNCE_MS = 350
 const TOUCH_WINDOW_MS = 2 * 60 * 60 * 1000
+/** A preview outlives a prompt but not a day of silence. Re-registering extends it. */
+const PREVIEW_TTL_MS = 12 * 60 * 60 * 1000
+const PREVIEW_MIN_TTL_MS = 5 * 60 * 1000
+const PREVIEW_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 function emptyState(): PersistedState {
   return {
@@ -58,6 +98,7 @@ function emptyState(): PersistedState {
     messages: [],
     claims: [],
     fileTouches: {},
+    previews: [],
   }
 }
 
@@ -67,6 +108,71 @@ function asNumber(value: unknown, fallback: number): number {
 
 function asBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback
+}
+
+const MAX_LAUNCHER_LENGTH = 400
+
+/**
+ * A launcher is one line of command; keep it plain and short. Newlines become
+ * spaces: the text is typed into a tmux pane, where a newline would run it.
+ */
+function sanitizeLauncher(value: unknown, fallback = ''): string {
+  if (typeof value !== 'string') return fallback
+  let text = ''
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0
+    text += code < 0x20 || code === 0x7f ? ' ' : char
+  }
+  return text.trim().slice(0, MAX_LAUNCHER_LENGTH)
+}
+
+function sanitizePreviewRules(value: unknown): PreviewRule[] {
+  if (!Array.isArray(value)) return []
+  const rules: PreviewRule[] = []
+  for (const item of value) {
+    const rule = normalizePreviewRule(item)
+    if (!rule) continue
+    if (rules.some((existing) => existing.pattern === rule.pattern)) continue
+    rules.push(rule)
+    if (rules.length >= MAX_PREVIEW_RULES) break
+  }
+  return rules
+}
+
+function sanitizePreviewHosts(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return [...fallback]
+  const hosts: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const host = normalizePreviewHost(item)
+    if (!host || hosts.includes(host)) continue
+    hosts.push(host)
+    if (hosts.length >= MAX_PREVIEW_HOSTS) break
+  }
+  return hosts
+}
+
+function sanitizePreviewZone(value: unknown, fallback = ''): string {
+  if (typeof value !== 'string' || value.trim() === '') return fallback
+  return normalizePreviewZone(value) ?? fallback
+}
+
+function sanitizePreviewRegistration(value: unknown): PreviewRegistration | null {
+  if (!value || typeof value !== 'object') return null
+  const item = value as Partial<PreviewRegistration>
+  if (typeof item.sessionId !== 'string' || !item.sessionId) return null
+  const name = normalizePreviewName(item.name)
+  const port = parsePreviewPort(item.port)
+  const expiresAt = asNumber(item.expiresAt, 0)
+  if (!name || !port || expiresAt <= 0) return null
+  return {
+    sessionId: item.sessionId,
+    name,
+    port,
+    routes: normalizePreviewRoutes(item.routes) ?? [],
+    createdAt: asNumber(item.createdAt, 0),
+    expiresAt,
+  }
 }
 
 function sanitizeActivity(value: unknown): ActivityEvent | null {
@@ -82,6 +188,28 @@ function sanitizeActivity(value: unknown): ActivityEvent | null {
     tool: typeof event.tool === 'string' ? event.tool : undefined,
     file: typeof event.file === 'string' ? event.file : undefined,
     status: event.status,
+  }
+}
+
+const MAX_LAUNCH_TOKENS = 200
+const MAX_LAUNCH_TOKEN_LENGTH = 4_000
+
+function sanitizeLaunch(value: unknown): LaunchSpec | null {
+  if (!value || typeof value !== 'object') return null
+  const spec = value as Partial<LaunchSpec>
+  const tokens = (input: unknown): string[] =>
+    Array.isArray(input)
+      ? input
+          .filter((token): token is string => typeof token === 'string')
+          .slice(0, MAX_LAUNCH_TOKENS)
+          .map((token) => token.slice(0, MAX_LAUNCH_TOKEN_LENGTH))
+      : []
+  const prefix = tokens(spec.prefix)
+  if (!prefix.length) return null
+  return {
+    prefix,
+    args: tokens(spec.args),
+    cwd: typeof spec.cwd === 'string' && spec.cwd ? spec.cwd : null,
   }
 }
 
@@ -101,6 +229,7 @@ function sanitizeSession(id: string, value: unknown): SessionMeta | null {
     lastSeenAt: asNumber(meta.lastSeenAt, lastActivityAt),
     lastActivityAt,
     endedAt: typeof meta.endedAt === 'number' ? meta.endedAt : null,
+    launch: sanitizeLaunch(meta.launch),
     activities: activities.slice(-MAX_ACTIVITIES_PER_SESSION),
   }
 }
@@ -171,6 +300,23 @@ function sanitizeState(raw: unknown): PersistedState {
       ),
     )
     state.settings.launchEnabled = asBoolean(settings.launchEnabled, DEFAULT_SETTINGS.launchEnabled)
+    state.settings.sessionLauncher = sanitizeLauncher(
+      settings.sessionLauncher,
+      DEFAULT_SETTINGS.sessionLauncher,
+    )
+    state.settings.autoRestartSessions = asBoolean(
+      settings.autoRestartSessions,
+      DEFAULT_SETTINGS.autoRestartSessions,
+    )
+    state.settings.previewRules = sanitizePreviewRules(settings.previewRules)
+    state.settings.previewHosts = sanitizePreviewHosts(
+      settings.previewHosts,
+      DEFAULT_SETTINGS.previewHosts,
+    )
+    state.settings.previewZone = sanitizePreviewZone(
+      settings.previewZone,
+      DEFAULT_SETTINGS.previewZone,
+    )
   }
 
   if (input.sessions && typeof input.sessions === 'object') {
@@ -195,6 +341,12 @@ function sanitizeState(raw: unknown): PersistedState {
         .filter((touch): touch is FileTouch => !!touch)
         .slice(-MAX_TOUCHES_PER_SESSION)
     }
+  }
+  if (Array.isArray(input.previews)) {
+    state.previews = input.previews
+      .map(sanitizePreviewRegistration)
+      .filter((preview): preview is PreviewRegistration => !!preview)
+      .slice(-MAX_PREVIEW_REGISTRATIONS)
   }
   return state
 }
@@ -248,6 +400,21 @@ export class StateStore {
     if (typeof patch.launchEnabled === 'boolean') {
       this.state.settings.launchEnabled = patch.launchEnabled
     }
+    if (patch.sessionLauncher !== undefined) {
+      this.state.settings.sessionLauncher = sanitizeLauncher(patch.sessionLauncher)
+    }
+    if (typeof patch.autoRestartSessions === 'boolean') {
+      this.state.settings.autoRestartSessions = patch.autoRestartSessions
+    }
+    if (patch.previewRules !== undefined) {
+      this.state.settings.previewRules = sanitizePreviewRules(patch.previewRules)
+    }
+    if (patch.previewHosts !== undefined) {
+      this.state.settings.previewHosts = sanitizePreviewHosts(patch.previewHosts, [])
+    }
+    if (patch.previewZone !== undefined) {
+      this.state.settings.previewZone = sanitizePreviewZone(patch.previewZone)
+    }
     this.touch()
     return this.getSettings()
   }
@@ -272,12 +439,25 @@ export class StateStore {
         lastSeenAt: at,
         lastActivityAt: at,
         endedAt: null,
+        launch: null,
         activities: [],
       }
       this.state.sessions[id] = meta
       this.touch()
     }
     return meta
+  }
+
+  setLaunchSpec(id: string, spec: LaunchSpec): void {
+    const meta = this.ensureSession(id)
+    const sanitized = sanitizeLaunch(spec)
+    if (!sanitized) return
+    meta.launch = sanitized
+    this.touch()
+  }
+
+  getLaunchSpec(id: string): LaunchSpec | null {
+    return this.state.sessions[id]?.launch ?? null
   }
 
   touchSession(id: string, at = now()): void {
@@ -370,6 +550,75 @@ export class StateStore {
     return this.state.messages.find((message) => message.id === id)
   }
 
+  /**
+   * A session announces its dev server. One registration per session; asking
+   * again replaces it and refreshes the deadline. Names are unique among live
+   * registrations, so two checkouts never fight over one host.
+   */
+  registerPreview(
+    sessionId: string,
+    input: { name: string; port: number; ttlMinutes?: number; routes?: unknown },
+    at = now(),
+  ): PreviewRegistration {
+    const port = parsePreviewPort(input.port)
+    if (!port) throw new Error('A preview port must be an integer between 1 and 65535.')
+    const routes = input.routes === undefined ? [] : normalizePreviewRoutes(input.routes)
+    if (!routes) {
+      throw new Error(
+        'Each preview route needs a prefix starting with / and a port; prefixes must be unique.',
+      )
+    }
+    const base = normalizePreviewName(input.name) ?? 'preview'
+    const ttlMs = Math.min(
+      PREVIEW_MAX_TTL_MS,
+      Math.max(
+        PREVIEW_MIN_TTL_MS,
+        Math.round(asNumber(input.ttlMinutes, PREVIEW_TTL_MS / 60_000) * 60_000),
+      ),
+    )
+    this.state.previews = this.activePreviews(at).filter(
+      (preview) => preview.sessionId !== sessionId,
+    )
+    const taken = new Set(this.state.previews.map((preview) => preview.name))
+    let name = base
+    for (let suffix = 2; taken.has(name) && suffix <= 99; suffix += 1) {
+      const tail = `-${suffix}`
+      name = `${base.slice(0, MAX_PREVIEW_NAME_LENGTH - tail.length).replace(/-+$/, '')}${tail}`
+    }
+    const registration: PreviewRegistration = {
+      sessionId,
+      name,
+      port,
+      routes,
+      createdAt: at,
+      expiresAt: at + ttlMs,
+    }
+    this.state.previews.push(registration)
+    if (this.state.previews.length > MAX_PREVIEW_REGISTRATIONS) {
+      this.state.previews.splice(0, this.state.previews.length - MAX_PREVIEW_REGISTRATIONS)
+    }
+    this.touch()
+    return { ...registration }
+  }
+
+  removePreview(sessionId: string): boolean {
+    const before = this.state.previews.length
+    this.state.previews = this.state.previews.filter((preview) => preview.sessionId !== sessionId)
+    const removed = this.state.previews.length !== before
+    if (removed) this.touch()
+    return removed
+  }
+
+  /** Live registrations, dropping expired ones on the way. */
+  activePreviews(at = now()): PreviewRegistration[] {
+    this.state.previews = this.state.previews.filter((preview) => preview.expiresAt > at)
+    return this.state.previews.slice()
+  }
+
+  previewFor(sessionId: string, at = now()): PreviewRegistration | null {
+    return this.activePreviews(at).find((preview) => preview.sessionId === sessionId) ?? null
+  }
+
   /** Messages that should travel to a session on its next prompt. */
   pendingDeliveries(sessionId: string): SessionMessage[] {
     return this.state.messages.filter(
@@ -387,6 +636,16 @@ export class StateStore {
       if (set.has(message.id) && message.deliveries[sessionId] === undefined) {
         message.deliveries[sessionId] = now()
       }
+    }
+    this.touch()
+  }
+
+  /** Takes a delivery back when the text never reached the session. */
+  unmarkDelivered(sessionId: string, ids: string[]): void {
+    if (!ids.length) return
+    const set = new Set(ids)
+    for (const message of this.state.messages) {
+      if (set.has(message.id)) delete message.deliveries[sessionId]
     }
     this.touch()
   }
@@ -530,6 +789,7 @@ export class StateStore {
       }
     }
     this.state.claims = this.state.claims.filter((claim) => claim.expiresAt > at)
+    this.state.previews = this.state.previews.filter((preview) => preview.expiresAt > at)
     this.state.messages = this.state.messages.filter(
       (message) => at - message.createdAt < ENDED_RETENTION_MS,
     )

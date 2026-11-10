@@ -2,9 +2,12 @@
 import { spawn } from 'node:child_process'
 import { constants as fsConstants } from 'node:fs'
 import { access, readdir, readFile, rm, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import path from 'node:path'
 import { buildServer, clientUrl, EventHub } from './api.js'
 import { type AppConfig, ConfigError, HELP, parseConfig } from './config.js'
+import { OrchestrationService } from './orchestration.js'
+import { type PreviewRouterHandle, startPreviewRouter } from './preview-router.js'
 import { SessionManager } from './session-manager.js'
 import { StateStore } from './state-store.js'
 import { atomicWriteJson, ensureDir, isPidAlive, pathExists } from './util.js'
@@ -116,6 +119,13 @@ async function doctor(config: AppConfig): Promise<void> {
     writable = false
   }
   lines.push(`data dir        ${config.dataDir} (${writable ? 'writable' : 'NOT WRITABLE'})`)
+  lines.push(
+    `preview router  ${
+      config.previewPort > 0
+        ? `${config.previewBind}:${config.previewPort}${config.previewSecret ? ' (secret required)' : ''}${config.previewPassword ? ' (login required)' : ''}`
+        : 'off'
+    }`,
+  )
 
   const webIndex = path.join(config.webDir, 'index.html')
   lines.push(
@@ -171,9 +181,30 @@ async function serve(config: AppConfig): Promise<void> {
   const store = new StateStore(config.dataDir)
   await store.init()
   const hub = new EventHub()
-  const manager = new SessionManager(config, store, (event) => hub.publish(event))
+  let manager: SessionManager
+  const orchestration = new OrchestrationService({
+    dataDir: config.dataDir,
+    readOnly: () => config.readOnly,
+    getSession: (id) => manager.getSession(id),
+    sendPrompt: (id, text) => manager.sendPrompt(id, text),
+    launchCommander: (input) => manager.launchCommanderSession(input),
+    listSessions: () => manager.getSessions(),
+    // The commander coordinates sessions across every project, so the home
+    // directory (with the top-level project map) is a better default than the
+    // daemon's own checkout. Override with CSM_COMMANDER_CWD.
+    commanderCwd: process.env.CSM_COMMANDER_CWD || homedir(),
+    onChange: (commandCenter) => hub.publish({ type: 'command-center', commandCenter }),
+  })
+  await orchestration.init()
+  manager = new SessionManager(config, store, (event) => hub.publish(event), {
+    orchestration: {
+      contextFor: (sessionId, reason) => orchestration.contextFor(sessionId, reason),
+      commanderSessionId: () => orchestration.snapshot().commanderSessionId,
+    },
+  })
   await manager.init()
-  const app = await buildServer(config, manager, hub)
+  const app = await buildServer(config, manager, hub, orchestration)
+  let previewRouter: PreviewRouterHandle | null = null
 
   let shuttingDown = false
   const shutdown = async (signal: string): Promise<void> => {
@@ -185,6 +216,7 @@ async function serve(config: AppConfig): Promise<void> {
       // closing the HTTP server, otherwise close() would wait for their timeout.
       await manager.close()
       hub.close()
+      await previewRouter?.close()
       await app.close()
       await store.close()
     } catch (error) {
@@ -224,6 +256,29 @@ async function serve(config: AppConfig): Promise<void> {
     startedAt: manager.startedAt,
   } satisfies ClientFile)
 
+  if (config.previewPort > 0) {
+    try {
+      previewRouter = await startPreviewRouter({
+        port: config.previewPort,
+        bind: config.previewBind,
+        secret: config.previewSecret,
+        password: config.previewPassword,
+        zone: () => store.getSettings().previewZone,
+        previews: () => store.activePreviews(),
+        log: (message) => process.stderr.write(`[csm] preview router: ${message}\n`),
+      })
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      process.stderr.write(
+        `[csm] preview router ${
+          code === 'EADDRINUSE'
+            ? `port ${config.previewPort} is already in use`
+            : `could not start: ${(error as Error).message}`
+        }\n`,
+      )
+    }
+  }
+
   const settings = store.getSettings()
   process.stdout.write(
     [
@@ -236,6 +291,15 @@ async function serve(config: AppConfig): Promise<void> {
       `  questions      ${settings.questionMode} (timeout ${settings.questionTimeoutSeconds}s)`,
       `  read only      ${config.readOnly ? 'yes' : 'no'}`,
       `  auth           ${config.token ? 'bearer token' : 'none (loopback only)'}`,
+      `  preview router ${
+        previewRouter
+          ? `${config.previewBind}:${previewRouter.port}`
+          : config.previewPort > 0
+            ? 'not running'
+            : 'off'
+      }`,
+      `  preview zone   ${settings.previewZone || 'not set (registered previews are off)'}`,
+      `  preview login  ${config.previewPassword ? 'password required' : 'open'}`,
       '',
       `  Plugin clients read ${clientFile(config)}.`,
       '  Press Ctrl+C to stop.',

@@ -1,10 +1,11 @@
 # Claude Session Manager plugin
 
-This plugin connects Claude Code to the [Claude Session Manager](../README.md) daemon. It does three things:
+This plugin connects Claude Code to the [Claude Session Manager](../README.md) daemon. It does four things:
 
 - **Reports** each session's work, status and questions to the local board through lifecycle hooks.
 - **Bridges questions**: an `AskUserQuestion` prompt can be answered in the browser; the answer is returned to the session as the tool result.
 - **Coordinates peers**: an MCP server with tools to list sessions, message them, inspect shared file changes and claim files.
+- **Orchestrates work**: a designated main session can turn a human goal into durable, delegated tasks, share knowledge, and ask the human for decisions that block a task until answered.
 
 Without a running daemon every hook and tool fails soft. Claude Code behaves exactly as it would without the plugin.
 
@@ -53,15 +54,25 @@ Only tool metadata is sent: file paths, commands, and the full `AskUserQuestion`
 
 ## MCP tools
 
-| Tool             | Purpose                                            |
-| ---------------- | -------------------------------------------------- |
-| `list_sessions`  | All sessions: status, repo, task, pending question |
-| `get_session`    | Detail: todos, recent activity, unread messages    |
-| `send_message`   | Leave a message for one session or broadcast       |
-| `read_inbox`     | Read and clear this session's messages             |
-| `shared_changes` | Files other sessions changed, overlaps, claims     |
-| `claim_files`    | Announce files this session is about to edit       |
-| `release_files`  | Release claims                                     |
+| Tool                 | Purpose                                             |
+| -------------------- | --------------------------------------------------- |
+| `list_sessions`      | All sessions: status, repo, task, pending question  |
+| `get_session`        | Detail: todos, recent activity, unread messages     |
+| `send_message`       | Leave a message for one session or broadcast        |
+| `read_inbox`         | Read and clear this session's messages              |
+| `shared_changes`     | Files other sessions changed, overlaps, claims      |
+| `claim_files`        | Announce files this session is about to edit        |
+| `release_files`      | Release claims                                      |
+| `register_preview`   | Announce a dev server port, so the board links it   |
+| `clear_preview`      | Remove this session's preview link                  |
+| `get_command_center` | Current tasks, knowledge, decisions and commands    |
+| `create_task`        | Create a task, optionally assigning and dispatching |
+| `update_task`        | Report status, progress, notes and results          |
+| `report_status`      | Commander report for the human command channel      |
+| `dispatch_task`      | Deliver a task to its assignee again                |
+| `share_knowledge`    | Publish durable knowledge, scoped or pinned         |
+| `list_knowledge`     | Search active shared knowledge                      |
+| `request_decision`   | Ask the human; optionally block the linked task     |
 
 Session identity is resolved through the process tree and Claude Code's session registry. If your setup cannot be resolved automatically, export `CSM_SESSION_ID` before starting Claude Code.
 

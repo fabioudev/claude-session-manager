@@ -695,6 +695,11 @@
   border-left-color: var(--accent);
 }
 
+.banner-update {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .banner-spacer {
   flex: 1;
 }
@@ -878,6 +883,35 @@
 
   .mobile-nav .nav-count {
     margin-left: 2px;
+  }
+
+  /* Four destinations fit on a phone without a hidden horizontal scroller. */
+  .mobile-nav {
+    overflow: visible;
+  }
+
+  .mobile-nav .nav-list {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 2px;
+    width: 100%;
+  }
+
+  .mobile-nav .nav-link {
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    min-height: 46px;
+    padding: 4px 2px;
+    font-size: 11px;
+  }
+
+  .mobile-nav .nav-count {
+    position: absolute;
+    top: 1px;
+    right: 7px;
+    margin: 0;
+    font-size: 8.5px;
   }
 
   .mobile-nav .nav-link.active::before {

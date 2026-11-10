@@ -32,6 +32,16 @@ describe('boardBuckets', () => {
     expect(buckets.ended).toEqual([session])
   })
 
+  it('only counts a waiting session as needs-you when a question is answerable here', () => {
+    const askable = makeSession({ id: 'ask', status: 'waiting', question })
+    // A prompt or permission question in the terminal has nothing to click.
+    const inTerminal = makeSession({ id: 'term', status: 'waiting', question: null })
+    const buckets = boardBuckets([askable, inTerminal])
+    expect(buckets.needs).toEqual([askable])
+    expect(buckets.terminal).toEqual([inTerminal])
+    expect(activeCount(buckets)).toBe(2)
+  })
+
   it('keeps archived sessions out of every active bucket', () => {
     const session = makeSession({ id: 'old', status: 'waiting', archived: true })
     const buckets = boardBuckets([session])

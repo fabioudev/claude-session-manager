@@ -34,6 +34,8 @@ function session(overrides: Partial<SessionSummary> & { id: string }): SessionSu
     endedAt: null,
     model: null,
     version: null,
+    pluginVersion: null,
+    update: { available: false, claude: false, plugin: false, restartable: false },
     tokens: null,
     live: false,
     pid: null,

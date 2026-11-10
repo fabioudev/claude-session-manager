@@ -10,15 +10,36 @@ import Fastify, {
 } from 'fastify'
 import type {
   ClaimInput,
+  CommanderUpdateInput,
+  DecisionInput,
+  DelegatedTaskInput,
+  DelegatedTaskPatch,
+  DelegatedTaskPriority,
+  DelegatedTaskStatus,
   HookEnvelope,
+  KnowledgeInput,
+  KnowledgePatch,
   LaunchSessionInput,
   MessageInput,
+  PreviewRegistration,
+  PreviewRoute,
+  PreviewRule,
   QuestionAnswerInput,
   ServerEvent,
   SessionPatch,
   SettingsPatch,
 } from '../shared/types.js'
 import type { AppConfig } from './config.js'
+import { OrchestrationError, type OrchestrationService } from './orchestration.js'
+import {
+  hostNameInZone,
+  MAX_PREVIEW_HOSTS,
+  MAX_PREVIEW_RULES,
+  normalizePreviewHost,
+  normalizePreviewRule,
+  normalizePreviewZone,
+  previewUrl,
+} from './preview.js'
 import type { SessionManager } from './session-manager.js'
 import { pathExists } from './util.js'
 import { VERSION } from './version.js'
@@ -131,6 +152,30 @@ export class EventHub {
   }
 }
 
+/**
+ * Action routes (resume, restart, stop, dismiss) answer to a POST that carries
+ * nothing. A browser sends those without a content type and with an empty body,
+ * but a reverse proxy may re-encode them as a chunked body, which Fastify cannot
+ * match to any parser and turns into a 415. Accept an empty body whatever the
+ * declared type; anything with actual content still has to be JSON.
+ */
+export function emptyBodyParser(
+  contentTypes: string | RegExp,
+  body: string | Buffer,
+  done: (error: Error | null, value?: unknown) => void,
+): void {
+  const text = typeof body === 'string' ? body : body.toString('utf8')
+  if (text.trim() === '') {
+    done(null, undefined)
+    return
+  }
+  const error = new Error(`Unsupported media type: ${String(contentTypes)}.`) as Error & {
+    statusCode: number
+  }
+  error.statusCode = 415
+  done(error)
+}
+
 function applySecurityHeaders(reply: FastifyReply): void {
   reply.header('X-Content-Type-Options', 'nosniff')
   reply.header('X-Frame-Options', 'DENY')
@@ -147,6 +192,7 @@ export async function buildServer(
   config: AppConfig,
   manager: SessionManager,
   hub: EventHub,
+  orchestration: OrchestrationService,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,
@@ -158,10 +204,17 @@ export async function buildServer(
   const webIndex = path.join(config.webDir, 'index.html')
   const hasWeb = await pathExists(webIndex)
 
+  app.addContentTypeParser('*', { parseAs: 'string' }, (request, body, done) => {
+    emptyBodyParser(request.headers['content-type'] ?? 'no content type', body, done)
+  })
+
   app.addHook('onRequest', async (request, reply) => {
     applySecurityHeaders(reply)
     if (!request.url.startsWith('/api/')) return
     if (request.url.startsWith('/api/health')) return
+    // Caddy's on_demand_tls asks this endpoint before issuing a certificate.
+    // It answers only on the daemon's loopback bind and reveals just yes/no.
+    if (request.url.startsWith('/api/previews/ask')) return
     if (!config.token) return
     const provided = requestToken(request)
     if (!provided || !safeEqual(provided, config.token)) {
@@ -184,6 +237,24 @@ export async function buildServer(
       console.error(`[csm] ${request.method} ${request.url}:`, error)
       return sendError(reply, 500, 'internal', 'Internal server error.')
     }
+    if (status === 415) {
+      // The board always sends JSON, so a rejected body means something else
+      // reached the daemon: a stale page, a proxy, or a hand-written request.
+      // Log what arrived, because the browser only shows the message.
+      console.warn(
+        `[csm] 415 ${request.method} ${request.url} content-type=${
+          request.headers['content-type'] ?? 'none'
+        } ua=${request.headers['user-agent'] ?? 'none'}`,
+      )
+      return sendError(
+        reply,
+        415,
+        'unsupported_media_type',
+        `The daemon reads JSON only; the request arrived as ${
+          request.headers['content-type'] ?? 'no content type'
+        }.`,
+      )
+    }
     const code = status === 413 ? 'payload_too_large' : 'bad_request'
     return sendError(reply, status, code, error.message)
   })
@@ -196,6 +267,94 @@ export async function buildServer(
   }))
 
   app.get('/api/config', async () => manager.getPublicConfig())
+
+  const previewPayload = (
+    registration: PreviewRegistration,
+  ): PreviewRegistration & {
+    url: string | null
+  } => {
+    const zone = manager.getPreviewZone()
+    return { ...registration, url: zone ? previewUrl(registration.name, zone) : null }
+  }
+
+  app.get('/api/previews', async () => ({
+    zone: manager.getPreviewZone(),
+    previews: manager.listPreviews().map(previewPayload),
+  }))
+
+  /**
+   * Caddy's on_demand_tls calls this before it requests a certificate. Only a
+   * name registered right now gets one, so a random host never reaches the CA.
+   */
+  app.get('/api/previews/ask', async (request, reply) => {
+    const query = request.query as { domain?: unknown }
+    const domain = typeof query.domain === 'string' ? query.domain : ''
+    const zone = manager.getPreviewZone()
+    const name = zone ? hostNameInZone(domain, zone) : null
+    if (!name || !manager.listPreviews().some((registration) => registration.name === name)) {
+      return sendError(reply, 403, 'forbidden', 'No preview is registered for this name.')
+    }
+    return { ok: true, name }
+  })
+
+  app.post('/api/mcp/preview', async (request, reply) => {
+    const sessionId = sessionHeader(request)
+    if (!sessionId) {
+      return sendError(reply, 400, 'bad_request', 'Missing x-csm-session-id header.')
+    }
+    if (!manager.hasSession(sessionId)) {
+      return sendError(reply, 404, 'not_found', 'Unknown session.')
+    }
+    const body = asObject(request.body)
+    if (!body || body.port === undefined) {
+      return sendError(reply, 400, 'bad_request', 'Expected { port, name? }.')
+    }
+    try {
+      const registration = manager.registerPreview(sessionId, {
+        port: body.port as number,
+        name: typeof body.name === 'string' ? body.name : undefined,
+        ttlMinutes: typeof body.ttlMinutes === 'number' ? body.ttlMinutes : undefined,
+        routes: Array.isArray(body.routes) ? (body.routes as PreviewRoute[]) : undefined,
+      })
+      return reply.code(201).send(previewPayload(registration))
+    } catch (error) {
+      return sendError(reply, 400, 'bad_request', (error as Error).message)
+    }
+  })
+
+  app.delete('/api/mcp/preview', async (request, reply) => {
+    const sessionId = sessionHeader(request)
+    if (!sessionId) {
+      return sendError(reply, 400, 'bad_request', 'Missing x-csm-session-id header.')
+    }
+    return { removed: manager.removePreview(sessionId) }
+  })
+
+  app.post('/api/sessions/:id/preview', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!manager.hasSession(id)) return sendError(reply, 404, 'not_found', 'Unknown session.')
+    const body = asObject(request.body)
+    if (!body || body.port === undefined) {
+      return sendError(reply, 400, 'bad_request', 'Expected { port, name? }.')
+    }
+    try {
+      const registration = manager.registerPreview(id, {
+        port: body.port as number,
+        name: typeof body.name === 'string' ? body.name : undefined,
+        ttlMinutes: typeof body.ttlMinutes === 'number' ? body.ttlMinutes : undefined,
+        routes: Array.isArray(body.routes) ? (body.routes as PreviewRoute[]) : undefined,
+      })
+      return reply.code(201).send(previewPayload(registration))
+    } catch (error) {
+      return sendError(reply, 400, 'bad_request', (error as Error).message)
+    }
+  })
+
+  app.delete('/api/sessions/:id/preview', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!manager.hasSession(id)) return sendError(reply, 404, 'not_found', 'Unknown session.')
+    return { removed: manager.removePreview(id) }
+  })
 
   app.get('/api/sessions', async () => ({
     sessions: manager.getSessions(),
@@ -330,6 +489,31 @@ export async function buildServer(
     return result.ok ? result : reply.code(409).send(result)
   })
 
+  app.post('/api/sessions/:id/restart', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!manager.hasSession(id)) return sendError(reply, 404, 'not_found', 'Unknown session.')
+    const result = await manager.restartSession(id)
+    return result.ok ? result : reply.code(409).send(result)
+  })
+
+  app.post('/api/sessions/:id/prompt', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!manager.hasSession(id)) return sendError(reply, 404, 'not_found', 'Unknown session.')
+    const body = asObject(request.body)
+    if (!body || typeof body.text !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { text } with the task to run.')
+    }
+    const result = await manager.sendPrompt(id, body.text)
+    return result.ok ? result : reply.code(400).send(result)
+  })
+
+  app.post('/api/sessions/:id/resume', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!manager.hasSession(id)) return sendError(reply, 404, 'not_found', 'Unknown session.')
+    const result = await manager.resumeSession(id)
+    return result.ok ? result : reply.code(409).send(result)
+  })
+
   app.patch('/api/settings', async (request, reply) => {
     const body = asObject(request.body)
     if (!body) return sendError(reply, 400, 'bad_request', 'Expected a JSON object.')
@@ -348,7 +532,263 @@ export async function buildServer(
       patch.questionTimeoutSeconds = body.questionTimeoutSeconds
     }
     if (typeof body.launchEnabled === 'boolean') patch.launchEnabled = body.launchEnabled
+    if (body.sessionLauncher !== undefined) {
+      if (typeof body.sessionLauncher !== 'string') {
+        return sendError(reply, 400, 'bad_request', 'Expected a session launcher string.')
+      }
+      if (body.sessionLauncher.length > 400) {
+        return sendError(reply, 400, 'bad_request', 'The session launcher is too long.')
+      }
+      patch.sessionLauncher = body.sessionLauncher
+    }
+    if (typeof body.autoRestartSessions === 'boolean') {
+      patch.autoRestartSessions = body.autoRestartSessions
+    }
+    if (body.previewHosts !== undefined) {
+      if (!Array.isArray(body.previewHosts)) {
+        return sendError(reply, 400, 'bad_request', 'Expected previewHosts to be a list of hosts.')
+      }
+      if (body.previewHosts.length > MAX_PREVIEW_HOSTS) {
+        return sendError(
+          reply,
+          400,
+          'bad_request',
+          `At most ${MAX_PREVIEW_HOSTS} preview hosts can be configured.`,
+        )
+      }
+      const hosts: string[] = []
+      for (const item of body.previewHosts) {
+        const host = typeof item === 'string' ? normalizePreviewHost(item) : null
+        if (!host) {
+          return sendError(
+            reply,
+            400,
+            'bad_request',
+            'A preview host must be a bare host name such as trycloudflare.com.',
+          )
+        }
+        if (!hosts.includes(host)) hosts.push(host)
+      }
+      patch.previewHosts = hosts
+    }
+    if (body.previewRules !== undefined) {
+      if (!Array.isArray(body.previewRules)) {
+        return sendError(reply, 400, 'bad_request', 'Expected previewRules to be a list.')
+      }
+      if (body.previewRules.length > MAX_PREVIEW_RULES) {
+        return sendError(
+          reply,
+          400,
+          'bad_request',
+          `At most ${MAX_PREVIEW_RULES} preview rules can be configured.`,
+        )
+      }
+      const rules: PreviewRule[] = []
+      for (const item of body.previewRules) {
+        const rule = normalizePreviewRule(item)
+        if (!rule) {
+          return sendError(
+            reply,
+            400,
+            'bad_request',
+            'Each preview rule needs a pattern and an http(s) URL.',
+          )
+        }
+        if (!rules.some((existing) => existing.pattern === rule.pattern)) rules.push(rule)
+      }
+      patch.previewRules = rules
+    }
+    if (body.previewZone !== undefined) {
+      if (typeof body.previewZone !== 'string') {
+        return sendError(reply, 400, 'bad_request', 'Expected a preview zone string.')
+      }
+      const zone = normalizePreviewZone(body.previewZone)
+      if (body.previewZone.trim() !== '' && !zone) {
+        return sendError(
+          reply,
+          400,
+          'bad_request',
+          'A preview zone must be a bare domain such as fixplay.dev.',
+        )
+      }
+      patch.previewZone = zone ?? ''
+    }
     return manager.updateSettings(patch)
+  })
+
+  const orchestrate = async <T>(
+    reply: FastifyReply,
+    action: () => Promise<T>,
+  ): Promise<T | FastifyReply> => {
+    try {
+      return await action()
+    } catch (error) {
+      if (error instanceof OrchestrationError) {
+        return sendError(reply, error.status, error.code, error.message)
+      }
+      throw error
+    }
+  }
+
+  app.get('/api/command-center', async () => orchestration.snapshot())
+
+  app.put('/api/commander', async (request, reply) => {
+    const body = asObject(request.body)
+    if (!body || (body.sessionId !== null && typeof body.sessionId !== 'string')) {
+      return sendError(reply, 400, 'bad_request', 'Expected { sessionId: string | null }.')
+    }
+    const sessionId = body.sessionId as string | null
+    return orchestrate(reply, async () => orchestration.setCommander(sessionId))
+  })
+
+  app.post('/api/commander/command', async (request, reply) => {
+    const body = asObject(request.body)
+    if (!body || typeof body.text !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { text } with the human goal.')
+    }
+    const text = body.text as string
+    return orchestrate(reply, async () => reply.code(201).send(await orchestration.command(text)))
+  })
+
+  app.post('/api/commander/updates', async (request, reply) => {
+    const body = asObject(request.body)
+    if (!body || typeof body.title !== 'string' || typeof body.body !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { title, body }.')
+    }
+    if (
+      body.taskIds !== undefined &&
+      (!Array.isArray(body.taskIds) || body.taskIds.some((id) => typeof id !== 'string'))
+    ) {
+      return sendError(reply, 400, 'bad_request', 'taskIds must be a list of strings.')
+    }
+    return orchestrate(reply, async () =>
+      reply
+        .code(201)
+        .send(
+          await orchestration.report(
+            body as unknown as CommanderUpdateInput,
+            sessionHeader(request),
+          ),
+        ),
+    )
+  })
+
+  const taskStatuses = new Set<DelegatedTaskStatus>([
+    'queued',
+    'in_progress',
+    'blocked',
+    'review',
+    'done',
+    'cancelled',
+  ])
+  const taskPriorities = new Set<DelegatedTaskPriority>(['low', 'normal', 'high', 'urgent'])
+
+  app.post('/api/tasks', async (request, reply) => {
+    const body = asObject(request.body)
+    if (!body || typeof body.title !== 'string' || typeof body.brief !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { title, brief }.')
+    }
+    if (
+      body.priority !== undefined &&
+      !taskPriorities.has(body.priority as DelegatedTaskPriority)
+    ) {
+      return sendError(reply, 400, 'bad_request', 'Unknown task priority.')
+    }
+    return orchestrate(reply, async () =>
+      reply
+        .code(201)
+        .send(
+          await orchestration.createTask(
+            body as unknown as DelegatedTaskInput,
+            sessionHeader(request),
+          ),
+        ),
+    )
+  })
+
+  app.patch('/api/tasks/:id', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const body = asObject(request.body)
+    if (!body) return sendError(reply, 400, 'bad_request', 'Expected a JSON object.')
+    if (body.status !== undefined && !taskStatuses.has(body.status as DelegatedTaskStatus)) {
+      return sendError(reply, 400, 'bad_request', 'Unknown task status.')
+    }
+    if (
+      body.priority !== undefined &&
+      !taskPriorities.has(body.priority as DelegatedTaskPriority)
+    ) {
+      return sendError(reply, 400, 'bad_request', 'Unknown task priority.')
+    }
+    return orchestrate(reply, async () =>
+      orchestration.updateTask(id, body as unknown as DelegatedTaskPatch, sessionHeader(request)),
+    )
+  })
+
+  app.post('/api/tasks/:id/dispatch', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    return orchestrate(reply, async () => orchestration.dispatchTask(id, sessionHeader(request)))
+  })
+
+  app.post('/api/knowledge', async (request, reply) => {
+    const body = asObject(request.body)
+    if (!body || typeof body.title !== 'string' || typeof body.body !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { title, body }.')
+    }
+    if (
+      body.tags !== undefined &&
+      (!Array.isArray(body.tags) || body.tags.some((tag) => typeof tag !== 'string'))
+    ) {
+      return sendError(reply, 400, 'bad_request', 'tags must be a list of strings.')
+    }
+    return orchestrate(reply, async () =>
+      reply
+        .code(201)
+        .send(
+          await orchestration.shareKnowledge(
+            body as unknown as KnowledgeInput,
+            sessionHeader(request),
+          ),
+        ),
+    )
+  })
+
+  app.patch('/api/knowledge/:id', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const body = asObject(request.body)
+    if (!body) return sendError(reply, 400, 'bad_request', 'Expected a JSON object.')
+    if (
+      body.tags !== undefined &&
+      (!Array.isArray(body.tags) || body.tags.some((tag) => typeof tag !== 'string'))
+    ) {
+      return sendError(reply, 400, 'bad_request', 'tags must be a list of strings.')
+    }
+    return orchestrate(reply, async () =>
+      orchestration.updateKnowledge(id, body as unknown as KnowledgePatch, sessionHeader(request)),
+    )
+  })
+
+  app.post('/api/decisions', async (request, reply) => {
+    const actor = sessionHeader(request)
+    if (!actor) return sendError(reply, 400, 'bad_request', 'Missing x-csm-session-id header.')
+    const body = asObject(request.body)
+    if (!body || typeof body.question !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { question, context?, taskId? }.')
+    }
+    return orchestrate(reply, async () =>
+      reply
+        .code(201)
+        .send(await orchestration.requestDecision(body as unknown as DecisionInput, actor)),
+    )
+  })
+
+  app.post('/api/decisions/:id/resolve', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const body = asObject(request.body)
+    if (!body || typeof body.answer !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { answer }.')
+    }
+    const answer = body.answer as string
+    return orchestrate(reply, async () => orchestration.resolveDecision(id, answer))
   })
 
   app.post('/api/hooks/event', async (request, reply) => {
@@ -428,6 +868,7 @@ export async function buildServer(
         type: 'hello',
         sessions: manager.getSessions(),
         questions: manager.getQuestions(),
+        commandCenter: orchestration.snapshot(),
         config: manager.getPublicConfig(),
         serverTime: Date.now(),
       } satisfies ServerEvent),

@@ -3,5 +3,6 @@
 @import "./styles/layout.css";
 @import "./styles/board.css";
 @import "./styles/dialog.css";
+@import "./styles/command.css";
 @import "./styles/detail.css";
 @import "./styles/pages.css";

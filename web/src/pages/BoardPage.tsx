@@ -4,9 +4,11 @@ import {
   Folder,
   GitBranch,
   GitMerge,
+  Globe,
   MessageSquare,
   Pin,
   Plus,
+  RefreshCw,
   Search,
   SquareTerminal,
 } from 'lucide-react'
@@ -22,6 +24,7 @@ import {
   dayTime,
   idleResponsePreview,
   isNeedsYou,
+  isWaitingInTerminal,
   relativeTime,
   repeatsMission,
   repoLabel,
@@ -88,7 +91,11 @@ function sortStamp(session: SessionSummary): number {
 const GROUPS: Record<BoardGroupKey, { title: string; hint: string }> = {
   needs: {
     title: 'Needs you now',
-    hint: 'Questions can be answered from the board. Permission prompts must be handled in the terminal.',
+    hint: 'Questions can be answered from the board.',
+  },
+  terminal: {
+    title: 'Waiting in a terminal',
+    hint: 'At a prompt or a permission question in its own terminal. The board cannot answer these.',
   },
   finished: {
     title: 'Finished and awaiting your next prompt',
@@ -131,10 +138,10 @@ function SessionRow({
   const repo = repoLabel(session)
   const sameName = Boolean(session.project) && repo.toLowerCase() === session.project?.toLowerCase()
   const repoText = [sameName ? null : repo, session.gitBranch].filter(Boolean).join(' / ')
+  const preview = session.preview
 
   return (
-    <Link
-      to={`/sessions/${session.id}`}
+    <div
       className={[
         'session-row',
         isNeedsYou(session) ? 'is-waiting' : '',
@@ -144,6 +151,16 @@ function SessionRow({
         .join(' ')}
       style={{ animationDelay: `${Math.min(index, 12) * 22}ms` }}
     >
+      {/*
+        The row is one big link, but a preview link must not be nested inside an
+        anchor. A stretched, invisible link keeps the whole row clickable while
+        the preview stays a normal anchor above it.
+      */}
+      <Link
+        className="session-row-hit"
+        to={`/sessions/${session.id}`}
+        aria-label={`Open session: ${title}`}
+      />
       <span className="session-signal">
         <StatusDot status={session.status} />
       </span>
@@ -190,6 +207,24 @@ function SessionRow({
               {session.overlapCount} overlap{session.overlapCount === 1 ? '' : 's'}
             </span>
           ) : null}
+          {session.update.available && session.live ? (
+            <span className="session-flag accent">
+              <RefreshCw size={10} aria-hidden="true" />
+              update ready
+            </span>
+          ) : null}
+          {preview ? (
+            <a
+              className="session-flag preview-flag"
+              href={preview.url}
+              target="_blank"
+              rel="noreferrer"
+              title={`Preview at ${preview.url} (opens in a new tab)`}
+            >
+              <Globe size={10} aria-hidden="true" />
+              preview
+            </a>
+          ) : null}
         </span>
       </span>
       {showTrace ? (
@@ -204,7 +239,7 @@ function SessionRow({
         </span>
         <span className="session-age">{relativeTime(stamp, now)}</span>
       </span>
-    </Link>
+    </div>
   )
 }
 
@@ -294,10 +329,11 @@ export function BoardPage() {
   const now = useNow(30_000)
 
   const buckets = useMemo(() => boardBuckets(sessions), [sessions])
-  const { needs: waiting, finished, working, unknown, ended, archived } = buckets
+  const { needs: waiting, terminal, finished, working, unknown, ended, archived } = buckets
+  const waitingTotal = waiting.length + terminal.length
   const activeSessions = useMemo(
-    () => [...waiting, ...finished, ...working, ...unknown],
-    [waiting, finished, working, unknown],
+    () => [...waiting, ...terminal, ...finished, ...working, ...unknown],
+    [waiting, terminal, finished, working, unknown],
   )
 
   const visibleQuestions = useMemo(() => {
@@ -309,7 +345,7 @@ export function BoardPage() {
 
   const counts: Record<Filter, number> = {
     active: activeCount(buckets),
-    waiting: waiting.length,
+    waiting: waitingTotal,
     working: working.length,
     idle: finished.length,
     ended: ended.length,
@@ -320,11 +356,18 @@ export function BoardPage() {
   const filtered = useMemo(() => {
     let base: SessionSummary[]
     if (filter === 'archived') base = buckets.archived
-    else if (filter === 'waiting') base = buckets.needs
+    else if (filter === 'waiting') base = [...buckets.needs, ...buckets.terminal]
     else if (filter === 'working') base = buckets.working
     else if (filter === 'idle') base = buckets.finished
     else if (filter === 'ended') base = buckets.ended
-    else base = [...buckets.needs, ...buckets.finished, ...buckets.working, ...buckets.unknown]
+    else
+      base = [
+        ...buckets.needs,
+        ...buckets.terminal,
+        ...buckets.finished,
+        ...buckets.working,
+        ...buckets.unknown,
+      ]
     const searched = query
       ? base.filter((session) =>
           [
@@ -349,10 +392,11 @@ export function BoardPage() {
       : base
     const priority = (session: SessionSummary): number => {
       if (isNeedsYou(session)) return 0
-      if (session.status === 'working') return 1
-      if (session.status === 'idle') return 2
-      if (session.status === 'unknown') return 3
-      return 4
+      if (isWaitingInTerminal(session)) return 1
+      if (session.status === 'working') return 2
+      if (session.status === 'idle') return 3
+      if (session.status === 'unknown') return 4
+      return 5
     }
     return searched.slice().sort((a, b) => {
       if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
@@ -386,12 +430,35 @@ export function BoardPage() {
       waiting.length === 1
         ? 'One session needs you now.'
         : `${Word(waiting.length)} sessions need you now.`
-    const parts = ['A question or permission prompt is holding the turn.']
+    const parts = ['A question is open and can be answered from the board.']
     if (finished.length > 0) {
       parts.push(
         `${Word(finished.length)} ${
           finished.length === 1 ? 'session has' : 'sessions have'
         } finished and ${finished.length === 1 ? 'is' : 'are'} waiting for your next prompt.`,
+      )
+    }
+    if (working.length > 0) {
+      parts.push(
+        `${Word(working.length)} ${
+          working.length === 1 ? 'session is' : 'sessions are'
+        } still working.`,
+      )
+    }
+    supporting = parts.join(' ')
+  } else if (terminal.length > 0) {
+    headline =
+      terminal.length === 1
+        ? 'One session is waiting in its terminal.'
+        : `${Word(terminal.length)} sessions are waiting in their terminals.`
+    const parts = [
+      'Nothing to do on the board: a prompt or a permission question is waiting in the terminal itself.',
+    ]
+    if (finished.length > 0) {
+      parts.push(
+        `${Word(finished.length)} ${
+          finished.length === 1 ? 'session has' : 'sessions have'
+        } finished.`,
       )
     }
     if (working.length > 0) {

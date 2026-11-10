@@ -143,8 +143,18 @@ export function sessionLabel(session: SessionSummary): string {
   return session.name || session.title || session.shortId
 }
 
+/**
+ * "Needs you" means the board can do something about it: a question is open
+ * and answerable here. A session that waits at a prompt or for a permission
+ * decision needs a human too, but only in its terminal.
+ */
 export function isNeedsYou(session: SessionSummary): boolean {
-  return session.status === 'waiting'
+  return session.status === 'waiting' && Boolean(session.question)
+}
+
+/** Waiting for a human in its terminal, with nothing to click on the board. */
+export function isWaitingInTerminal(session: SessionSummary): boolean {
+  return session.status === 'waiting' && !session.question
 }
 
 /** Repository links are often pasted before the actual request. */

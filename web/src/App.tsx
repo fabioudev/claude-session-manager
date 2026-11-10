@@ -3,6 +3,7 @@ import { AppShell } from './components/AppShell'
 import { BootScreen, TokenGate } from './components/ConnectionScreens'
 import { useLive } from './lib/live'
 import { BoardPage } from './pages/BoardPage'
+import { CommandPage } from './pages/CommandPage'
 import { CoordinationPage } from './pages/CoordinationPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { SessionPage } from './pages/SessionPage'
@@ -17,7 +18,8 @@ export function App() {
   return (
     <Routes>
       <Route element={<AppShell />}>
-        <Route index element={<BoardPage />} />
+        <Route index element={<CommandPage />} />
+        <Route path="sessions" element={<BoardPage />} />
         <Route path="sessions/:id" element={<SessionPage />} />
         <Route path="coordination" element={<CoordinationPage />} />
         <Route path="settings" element={<SettingsPage />} />

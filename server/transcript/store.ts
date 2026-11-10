@@ -8,6 +8,7 @@ import {
   createTranscriptState,
   parseTranscriptLines,
   pendingQuestionFromState,
+  type RecentToolResult,
   type TokenTotals,
   type TranscriptParseState,
 } from './parse.js'
@@ -38,6 +39,7 @@ export interface TranscriptView {
   lastToolName: string | null
   lastToolText: string | null
   lastToolAt: number | null
+  recentToolResults: RecentToolResult[]
   lastActivityAt: number | null
   startedAt: number | null
   promptCount: number
@@ -110,6 +112,7 @@ function emptyView(entry: Entry): TranscriptView {
     lastToolName: null,
     lastToolText: null,
     lastToolAt: null,
+    recentToolResults: [],
     lastActivityAt: entry.mtimeMs || null,
     startedAt: null,
     promptCount: 0,
@@ -158,6 +161,7 @@ export function viewFromState(entry: Entry): TranscriptView {
     lastToolName: state.lastToolName,
     lastToolText: state.lastToolText,
     lastToolAt: state.lastToolAt,
+    recentToolResults: state.recentToolResults.slice(),
     lastActivityAt: state.lastActivityAt,
     startedAt: state.startedAt,
     promptCount: state.promptCount,
