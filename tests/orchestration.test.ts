@@ -622,14 +622,40 @@ describe('OrchestrationService commands and decisions', () => {
     expect(failed.service.snapshot().tasks[0].lastNote).toContain('delivery failed')
   })
 
-  it('keeps the answer durable even when the requesting session has ended', async () => {
-    const { service, sessions } = await harness()
+  it('hands the answer to the commander when the requesting session has ended', async () => {
+    const { service, sessions, deliveries } = await harness()
     const decision = await service.requestDecision({ question: 'Which database?' }, 'worker')
     sessions.set('worker', makeSession({ id: 'worker', live: false, status: 'ended' }))
     const resolved = await service.resolveDecision(decision.id, 'Use the existing database.')
     expect(resolved.answer).toBe('Use the existing database.')
+    // A stored answer nobody reads changes nothing, so the commander takes it.
+    expect(resolved.delivery).toMatchObject({ ok: true, mode: 'typed' })
+    expect(deliveries.at(-1)?.id).toBe('commander')
+    expect(deliveries.at(-1)?.text).toContain('Use the existing database.')
+    expect(deliveries.at(-1)?.text).toContain('not running')
+  })
+
+  it('names the stranded worker and task in the fallback so the commander can act', async () => {
+    const { service, sessions, deliveries } = await harness()
+    const task = await assignedTask(service)
+    const decision = await service.requestDecision(
+      { taskId: task.id, question: 'Deploy?' },
+      'worker',
+    )
+    sessions.set('worker', makeSession({ id: 'worker', live: false, status: 'ended' }))
+    await service.resolveDecision(decision.id, 'Yes, deploy.')
+    const text = deliveries.at(-1)?.text ?? ''
+    expect(text).toContain(task.id)
+    expect(text).toContain('Worker')
+  })
+
+  it('keeps the error when neither the requester nor a commander is there', async () => {
+    const { service, sessions } = await harness(undefined, { autoCommander: true })
+    const decision = await service.requestDecision({ question: 'Which database?' }, 'worker')
+    sessions.set('worker', makeSession({ id: 'worker', live: false, status: 'ended' }))
+    const resolved = await service.resolveDecision(decision.id, 'Use the existing database.')
     expect(resolved.delivery?.ok).toBe(false)
-    expect(resolved.delivery?.error).toContain('requesting session has ended')
+    expect(resolved.delivery?.error).toContain('no commander')
   })
 })
 

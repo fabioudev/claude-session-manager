@@ -1434,21 +1434,44 @@ export class OrchestrationService {
     decision.resolvedAt = this.now()
     const task = decision.taskId ? this.task(decision.taskId) : null
     const target = this.options.getSession(decision.requestedBySessionId)
-    const delivery = target?.live
-      ? await this.options.sendPrompt(
-          target.id,
-          [
-            `[Human decision ${decision.id}]`,
-            `Question: ${decision.question}`,
-            `Answer: ${answer}`,
-            task
-              ? `Continue task ${task.id} (${task.title}) and report progress with update_task.`
-              : 'Continue with this answer.',
-          ].join('\n'),
-        )
-      : failedDispatch(
-          'The requesting session has ended. Resume it and send the answer from its session page.',
-        )
+    const lines = [`Question: ${decision.question}`, `Answer: ${answer}`]
+    let delivery: PromptResult
+    if (target?.live && target.status !== 'ended') {
+      delivery = await this.options.sendPrompt(
+        target.id,
+        [
+          `[Human decision ${decision.id}]`,
+          ...lines,
+          task
+            ? `Continue task ${task.id} (${task.title}) and report progress with update_task.`
+            : 'Continue with this answer.',
+        ].join('\n'),
+      )
+    } else {
+      // The session that asked is gone. A stored answer nobody reads is the same
+      // as no answer — the worker stays blocked — so the commander takes over
+      // and is told which session and task it concerns.
+      const commanderId = this.state.commanderSessionId
+      const worker = task?.assigneeSessionId
+        ? this.options.getSession(task.assigneeSessionId)
+        : null
+      delivery =
+        commanderId && this.options.getSession(commanderId)
+          ? await this.options.sendPrompt(
+              commanderId,
+              [
+                `[Human decision ${decision.id}] The session that asked (${shortId(decision.requestedBySessionId)}) is not running, so apply it yourself.`,
+                ...lines,
+                task ? `Task ${task.id}: ${task.title}` : 'No task is attached.',
+                worker && task?.assigneeSessionId
+                  ? `Worker ${shortId(task.assigneeSessionId)} is ${worker.status}${worker.live ? ' (live)' : ''} — resume it, wake it, or dispatch a replacement.`
+                  : 'No worker holds this task right now.',
+              ].join('\n'),
+            )
+          : failedDispatch(
+              'The requesting session has ended and no commander is running to take the answer.',
+            )
+    }
     decision.delivery = delivery
 
     if (task && task.status === 'blocked') {
