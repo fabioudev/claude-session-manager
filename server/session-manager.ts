@@ -294,6 +294,13 @@ function withoutResumeFlags(args: string[]): string[] {
   return kept
 }
 
+/** A launcher that only works with its model flag says so on stderr. */
+function needsModelFlag(error: unknown): boolean {
+  const err = error as { stderr?: string; stdout?: string; message?: string }
+  const detail = `${err.stderr ?? ''}${err.stdout ?? ''}${err.message ?? ''}`
+  return /model selection requires an interactive terminal/i.test(detail)
+}
+
 /**
  * Merges hook reports, transcripts, Claude Code's registries and background job
  * state into one live view of every session, and owns all mutations the UI can do.
@@ -1092,16 +1099,30 @@ export class SessionManager {
     const launcherArgs = input.resumeSessionId
       ? withoutResumeFlags(launcher.slice(1))
       : launcher.slice(1)
+    const strippedFlags =
+      input.resumeSessionId !== undefined && launcherArgs.length !== launcher.slice(1).length
 
     const startedAt = now()
+    const execOptions = {
+      cwd: launchCwd,
+      timeout: 60_000,
+      maxBuffer: 4 * 1024 * 1024,
+      env,
+      windowsHide: true,
+    }
+    // A launcher that picks the model through its own flag (an Ollama launch)
+    // refuses to start once that flag is gone. Retry with the full prefix then;
+    // the resume becomes a copy, and sessionReplaced moves the roles over.
+    const run = async (): Promise<{ stdout: string; stderr: string }> => {
+      try {
+        return await execFileAsync(bin, [...launcherArgs, ...args], execOptions)
+      } catch (error) {
+        if (!strippedFlags || !needsModelFlag(error)) throw error
+        return execFileAsync(bin, [...launcher.slice(1), ...args], execOptions)
+      }
+    }
     try {
-      const { stdout, stderr } = await execFileAsync(bin, [...launcherArgs, ...args], {
-        cwd: launchCwd,
-        timeout: 60_000,
-        maxBuffer: 4 * 1024 * 1024,
-        env,
-        windowsHide: true,
-      })
+      const { stdout, stderr } = await run()
       const output = `${stdout ?? ''}${stderr ?? ''}`.trim()
       const idMatch = output.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)
       const shortMatch = output.match(/\b[0-9a-f]{8}\b/i)
