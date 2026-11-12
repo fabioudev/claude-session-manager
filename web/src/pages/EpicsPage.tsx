@@ -69,7 +69,7 @@ function EpicCard({ rollup }: { rollup: EpicRollup }) {
           <span style={{ width: `${rollup.progress}%` }} />
         </div>
         <span>
-          {rollup.done}/{rollup.total} Aufgaben · {rollup.progress}%
+          {rollup.done}/{rollup.total} fertig · Ø {rollup.progress}%
         </span>
       </div>
       <div className="epic-card-foot">

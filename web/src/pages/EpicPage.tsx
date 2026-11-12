@@ -224,7 +224,7 @@ export function EpicPage() {
             <div className="epic-rollup-figure">
               <strong>{rollup.progress}%</strong>
               <span>
-                {rollup.done}/{rollup.total} Aufgaben
+                Ø Fortschritt · {rollup.done}/{rollup.total} fertig
               </span>
             </div>
             <div className="epic-progress" aria-hidden="true">
