@@ -132,6 +132,9 @@ export function epicTone(rollup: EpicRollup): string {
   if (label === 'Fertig') return 'done'
   if (label === 'Eingestellt' || label === 'Pausiert') return 'muted'
   if (label === 'Blockiert') return 'blocked'
-  if (label === 'Wartet auf dich' || label === 'Zur Abnahme') return 'needs'
+  if (label === 'Wartet auf dich') return 'needs'
+  // A review is the epic commander's job, not the human's: it must not look
+  // like an alert the person has to clear.
+  if (label === 'Zur Abnahme') return 'review'
   return 'active'
 }

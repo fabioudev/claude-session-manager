@@ -242,7 +242,7 @@ export function EpicPage() {
                 <span className="dot queued" aria-hidden="true" />
                 {rollup.counts.queued} warten
               </li>
-              <li>
+              <li title="Ergebnis ist fertig und wartet auf die Freigabe durch den Epic-Commander">
                 <span className="dot review" aria-hidden="true" />
                 {rollup.counts.review} zur Abnahme
               </li>
