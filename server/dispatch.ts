@@ -47,6 +47,8 @@ export interface WakeInput {
   session: SessionSummary
   /** The background job's own state, or null when there is no job. */
   backgroundState: string | null
+  /** The job's process is gone; its state file may still say "working". */
+  backgroundExited?: boolean
   /** The session is at a question only the person can answer. */
   hasQuestion: boolean
   supported: boolean
@@ -73,6 +75,10 @@ export function wakeDecision(input: WakeInput): WakeDecision {
   if (!input.session.jobId) return no('This session is not a background job.')
   if (input.hasQuestion) return no('The session is answering a question right now.')
   if (input.session.archived) return no('This session is archived.')
+  // A dead job cannot be working, whatever its last written state claims: the
+  // process was stopped (or the manager restarted) before it could record the
+  // exit. There is nothing to stop, so resume it directly.
+  if (input.backgroundExited) return { wake: true, stop: false }
   if (input.backgroundState === 'blocked') return { wake: true, stop: true }
   if (
     input.backgroundState === 'done' ||

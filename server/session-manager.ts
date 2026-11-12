@@ -180,6 +180,10 @@ export interface SessionManagerOptions {
     commanderSessionId: () => string | null
     /** A worker that held open tasks went away; the commander should re-plan. */
     sessionEnded?: (sessionId: string) => void
+    /**
+     * A wake started a copy under a new session id; ownership has to follow it.
+     */
+    sessionReplaced?: (from: string, to: string) => void
   }
 }
 
@@ -262,6 +266,26 @@ function statusRank(status: SessionStatus): number {
   if (status === 'idle') return 2
   if (status === 'unknown') return 3
   return 4
+}
+
+/**
+ * A `--resume` keeps the conversation's own saved options, and Claude Code
+ * starts a copy instead as soon as flags arrive beside it. Launchers commonly
+ * carry a default model, so those flags are dropped when resuming: the same
+ * session id continues, with the model it was started with.
+ */
+function withoutResumeFlags(args: string[]): string[] {
+  const kept: string[] = []
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? ''
+    if (arg === '--model' || arg === '--permission-mode') {
+      index += 1
+      continue
+    }
+    if (arg.startsWith('--model=') || arg.startsWith('--permission-mode=')) continue
+    kept.push(arg)
+  }
+  return kept
 }
 
 /**
@@ -902,6 +926,7 @@ export class SessionManager {
     const decision = wakeDecision({
       session,
       backgroundState: job?.state ?? null,
+      backgroundExited: job?.exited ?? false,
       hasQuestion: Boolean(session.question),
       supported: restartSupported(),
       launchEnabled: this.store.getSettings().launchEnabled,
@@ -935,11 +960,15 @@ export class SessionManager {
     ])
     this.scheduleRecompute(0)
     const copy = result.sessionId && result.sessionId !== session.id ? result.sessionId : null
+    // Claude Code started a copy instead of continuing this conversation, so
+    // the copy is where the work now happens. Move the epic/task/commander
+    // roles over instead of leaving them on a session nobody is running.
+    if (copy) this.orchestration?.sessionReplaced?.(session.id, copy)
     return {
       ok: true,
       mode: 'typed',
       note: copy
-        ? `Woke a copy of the background session (${copy}) because the original was still running.`
+        ? `Woke a copy of the background session (${copy}) because the original kept its own options.`
         : 'Woke the background session with this text.',
     }
   }
@@ -1054,7 +1083,9 @@ export class SessionManager {
     const launcher = dropRootBlockedFlags(launcherSpec(settings.sessionLauncher, launchCwd)).spec
       .prefix
     const bin = launcher[0] ?? this.claudeBin
-    const launcherArgs = launcher.slice(1)
+    const launcherArgs = input.resumeSessionId
+      ? withoutResumeFlags(launcher.slice(1))
+      : launcher.slice(1)
 
     const startedAt = now()
     try {
@@ -2054,9 +2085,10 @@ export class SessionManager {
       ? { ...questionBase, answerable: questionBase.answerable && !this.config.readOnly }
       : null
 
-    const jobWorking = job?.state === 'working'
-    const jobBlocked = job?.state === 'blocked'
-    const jobFinished = job?.state === 'done' || job?.state === 'failed' || job?.state === 'stopped'
+    const jobWorking = job?.state === 'working' && !job?.exited
+    const jobBlocked = job?.state === 'blocked' && !job?.exited
+    const jobFinished =
+      job?.exited || job?.state === 'done' || job?.state === 'failed' || job?.state === 'stopped'
     const liveFlag = Boolean(live) || jobWorking
     const notification = runtime?.notification ?? null
     const notificationWaiting =

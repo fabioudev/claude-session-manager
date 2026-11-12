@@ -217,6 +217,57 @@ describe('epics', () => {
     expect(deliveries[0].text).toContain('No epic commander owns it yet')
   })
 
+  it('nudges the main commander when the epic commander is not running', async () => {
+    const { service, sessions, deliveries } = await harness()
+    const epic = await service.createEpic(
+      { title: 'Offline', ownerSessionId: 'epic-owner' },
+      'commander',
+    )
+    // It was live when the epic was created; now its job is gone.
+    sessions.set(
+      'epic-owner',
+      makeSession({ id: 'epic-owner', name: 'Epic Owner', live: false, status: 'ended' }),
+    )
+    deliveries.length = 0
+    const updated = await service.postEpicMessage(epic.id, { body: 'Bist du da?' }, null)
+    expect(updated.messages.at(-1)?.deliveredAt).toBeNull()
+    expect(deliveries).toHaveLength(1)
+    expect(deliveries[0].id).toBe('commander')
+    expect(deliveries[0].text).toContain('is not running')
+  })
+
+  it('moves commander, epic owners and task assignees to a woken copy', async () => {
+    const { service } = await harness()
+    const epic = await service.createEpic(
+      { title: 'Copied', ownerSessionId: 'epic-owner' },
+      'commander',
+    )
+    const task = await service.createTask(
+      {
+        title: 'Carry on',
+        brief: 'The copy keeps working where the original stopped.',
+        assigneeSessionId: 'epic-owner',
+        epicId: epic.id,
+      },
+      'commander',
+    )
+    await service.setCommander('epic-owner')
+
+    await service.reassignSession('epic-owner', 'epic-owner-copy')
+
+    const snapshot = service.snapshot()
+    expect(snapshot.commanderSessionId).toBe('epic-owner-copy')
+    expect(snapshot.epics.find((item) => item.id === epic.id)?.ownerSessionId).toBe(
+      'epic-owner-copy',
+    )
+    expect(snapshot.tasks.find((item) => item.id === task.id)?.assigneeSessionId).toBe(
+      'epic-owner-copy',
+    )
+    expect(snapshot.epics.find((item) => item.id === epic.id)?.messages.at(-1)?.body).toContain(
+      'continued as',
+    )
+  })
+
   it('starts an epic commander and records the owner', async () => {
     const launchSession = vi.fn(
       async (_input: LaunchSessionInput): Promise<LaunchSessionResult> => ({

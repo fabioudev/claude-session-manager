@@ -1,7 +1,7 @@
 import type { Dirent } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
-import { isPidAlive, safeJsonParse } from './util.js'
+import { isPidAlive, pathExists, safeJsonParse } from './util.js'
 
 export interface LiveSession {
   sessionId: string
@@ -39,6 +39,13 @@ export interface BackgroundJob {
   model: string | null
   permissionMode: string | null
   fan: Array<{ id: string; label: string; done: boolean }>
+  /**
+   * The job's process is gone. Claude Code writes `adopt.json` into a job folder
+   * only when the job ended, so a folder with that file is history — even when
+   * its `state.json` still says "working" because the process was killed before
+   * it could record the exit.
+   */
+  exited: boolean
 }
 
 export interface RegistrySnapshot {
@@ -93,7 +100,7 @@ function parseLiveSession(raw: unknown): LiveSession | null {
   }
 }
 
-function parseJob(jobId: string, raw: unknown): BackgroundJob | null {
+function parseJob(jobId: string, raw: unknown, exited: boolean): BackgroundJob | null {
   if (!raw || typeof raw !== 'object') return null
   const value = raw as Record<string, unknown>
   const stateValue = asString(value.state)
@@ -141,6 +148,7 @@ function parseJob(jobId: string, raw: unknown): BackgroundJob | null {
     model: modelIndex >= 0 ? (flags[modelIndex + 1] ?? null) : null,
     permissionMode: permissionIndex >= 0 ? (flags[permissionIndex + 1] ?? null) : null,
     fan,
+    exited,
   }
 }
 
@@ -224,8 +232,10 @@ export class ClaudeRegistry {
         .filter((entry) => entry.isDirectory())
         .map(async (entry) => {
           try {
-            const text = await readFile(path.join(this.jobsDir, entry.name, 'state.json'), 'utf8')
-            const job = parseJob(entry.name, safeJsonParse(text))
+            const dir = path.join(this.jobsDir, entry.name)
+            const text = await readFile(path.join(dir, 'state.json'), 'utf8')
+            const exited = await pathExists(path.join(dir, 'adopt.json'))
+            const job = parseJob(entry.name, safeJsonParse(text), exited)
             if (!job) return
             // Old blocked/finished jobs stay on disk forever; they are history, not
             // something the board should show every day.

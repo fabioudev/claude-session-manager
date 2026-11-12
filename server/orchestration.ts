@@ -1188,6 +1188,43 @@ export class OrchestrationService {
     await this.nudgeCommander(lines.join('\n'))
   }
 
+  /**
+   * A wake that had to pass flags starts the work in a copy with a new session
+   * id. Everything that pointed at the original moves along: the commander
+   * role, epic owners and task assignees. Otherwise the board keeps following a
+   * session nobody runs while the copy works without a role.
+   */
+  async reassignSession(from: string, to: string): Promise<void> {
+    if (this.options.readOnly() || !from || !to || from === to) return
+    const at = this.now()
+    let changed = false
+    if (this.state.commanderSessionId === from) {
+      this.state.commanderSessionId = to
+      changed = true
+    }
+    for (const task of this.state.tasks) {
+      if (task.assigneeSessionId !== from) continue
+      task.assigneeSessionId = to
+      task.updatedAt = at
+      task.revision += 1
+      changed = true
+    }
+    for (const epic of this.state.epics) {
+      if (epic.ownerSessionId !== from) continue
+      epic.ownerSessionId = to
+      epic.updatedAt = at
+      epic.revision += 1
+      this.pushEpicMessage(
+        epic,
+        null,
+        'status',
+        `The epic commander continued as ${shortId(to)} (woken copy of ${shortId(from)}).`,
+      )
+      changed = true
+    }
+    if (changed) await this.commit()
+  }
+
   async dispatchTask(id: string, actorSessionId: string | null): Promise<DelegatedTask> {
     this.writable()
     const task = this.task(id)
@@ -1754,7 +1791,19 @@ export class OrchestrationService {
       return
     }
     const session = this.options.getSession(owner)
-    if (!session?.live || session.status === 'ended') return
+    if (!session?.live || session.status === 'ended') {
+      // The owner is not running, so the message cannot be delivered. It stays
+      // pending (the epic page says "not read yet") and the main commander gets
+      // told, because restarting or replacing that epic commander is its job.
+      await this.nudgeCommander(
+        [
+          `[Epic ${epic.id}] The human wrote in "${epic.title}":`,
+          truncate(message.body, 1500),
+          `Its epic commander (${shortId(owner)}) is not running, so the message waits. Answer in the epic thread with post_epic_message, or start a new epic commander with spawn_epic_commander.`,
+        ].join('\n'),
+      )
+      return
+    }
     const result = await this.options
       .sendPrompt(owner, this.epicMessagePrompt(epic, message))
       .catch(() => ({ ok: false as const, mode: 'queued' as const, error: 'Delivery failed.' }))

@@ -98,6 +98,16 @@ describe('wakeDecision', () => {
     expect(decision.reason).toContain('working')
   })
 
+  it('wakes a job whose state still says working but whose process is gone', () => {
+    expect(
+      wakeDecision({ ...background, backgroundState: 'working', backgroundExited: true }),
+    ).toEqual({ wake: true, stop: false })
+    // A dead job needs no stop either, whatever state it froze in.
+    expect(
+      wakeDecision({ ...background, backgroundState: 'blocked', backgroundExited: true }),
+    ).toEqual({ wake: true, stop: false })
+  })
+
   it('does not guess when the job state is unknown', () => {
     expect(wakeDecision({ ...background, backgroundState: 'unknown' }).wake).toBe(false)
   })
