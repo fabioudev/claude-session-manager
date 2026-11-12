@@ -7,6 +7,10 @@ import type {
   DelegatedTask,
   DelegatedTaskInput,
   DelegatedTaskPatch,
+  Epic,
+  EpicInput,
+  EpicMessageInput,
+  EpicPatch,
   FileClaim,
   KnowledgeEntry,
   KnowledgeInput,
@@ -229,6 +233,23 @@ export const api = {
     }),
   dispatchTask: (id: string) =>
     request<DelegatedTask>(`/tasks/${encodeURIComponent(id)}/dispatch`, { method: 'POST' }),
+  createEpic: (input: EpicInput) =>
+    request<Epic>('/epics', { method: 'POST', body: JSON.stringify(input) }),
+  updateEpic: (id: string, patch: EpicPatch) =>
+    request<Epic>(`/epics/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  postEpicMessage: (id: string, input: EpicMessageInput) =>
+    request<Epic>(`/epics/${encodeURIComponent(id)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  spawnEpicCommander: (id: string, name?: string) =>
+    request<Epic>(`/epics/${encodeURIComponent(id)}/commander`, {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
   shareKnowledge: (input: KnowledgeInput) =>
     request<KnowledgeEntry>('/knowledge', { method: 'POST', body: JSON.stringify(input) }),
   updateKnowledge: (id: string, patch: KnowledgePatch) =>

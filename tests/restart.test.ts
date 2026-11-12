@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   buildRestartCommand,
@@ -15,6 +18,8 @@ import {
   processEnvValue,
   readProcess,
   shellQuote,
+  transcriptStartDir,
+  trustedFolders,
   waitFor,
 } from '../server/restart.js'
 import { paneTarget, resumeSessionName } from '../server/tmux.js'
@@ -272,5 +277,58 @@ describe('looksLikeTrustPrompt', () => {
 
   it('leaves an ordinary pane alone', () => {
     expect(looksLikeTrustPrompt('❯ \n✻ Sautéed for 4m · done')).toBe(false)
+  })
+})
+
+describe('trustedFolders', () => {
+  it('lists only the folders that were accepted, not their parents', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'csm-trust-'))
+    const config = path.join(dir, 'claude.json')
+    await writeFile(
+      config,
+      JSON.stringify({
+        projects: {
+          '/root': { hasTrustDialogAccepted: true },
+          '/root/repo/sub': {},
+          '/root/other': { hasTrustDialogAccepted: false },
+        },
+      }),
+    )
+    const trusted = await trustedFolders(path.join(dir, 'claude'))
+    expect(trusted).not.toBeNull()
+    expect([...(trusted ?? [])]).toEqual(['/root'])
+  })
+
+  it('returns null when there is no readable config', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'csm-trust-'))
+    expect(await trustedFolders(path.join(dir, 'claude'))).toBeNull()
+  })
+})
+
+describe('transcriptStartDir', () => {
+  it('reads the folder the conversation was started in', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'csm-transcript-'))
+    const file = path.join(dir, 'session.jsonl')
+    await writeFile(
+      file,
+      [
+        JSON.stringify({ type: 'summary', summary: 'no cwd here' }),
+        JSON.stringify({ type: 'user', cwd: '/root', message: 'first' }),
+        JSON.stringify({ type: 'user', cwd: '/root/repo/sub', message: 'later' }),
+        '',
+      ].join('\n'),
+    )
+    expect(await transcriptStartDir(file)).toBe('/root')
+  })
+
+  it('returns null for a transcript without a folder', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'csm-transcript-'))
+    const file = path.join(dir, 'session.jsonl')
+    await writeFile(file, `${JSON.stringify({ type: 'summary' })}\n`)
+    expect(await transcriptStartDir(file)).toBeNull()
+  })
+
+  it('returns null for a missing transcript', async () => {
+    expect(await transcriptStartDir('/nonexistent/session.jsonl')).toBeNull()
   })
 })

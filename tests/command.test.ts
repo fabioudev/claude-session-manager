@@ -10,6 +10,8 @@ import {
   commanderFeed,
   commandStats,
   featureGroups,
+  latestCommanderMessage,
+  latestCommanderUpdate,
   offlineAssignments,
   taskColumns,
   visibleQuestions,
@@ -237,5 +239,110 @@ describe('command center presentation helpers', () => {
       }),
     )
     expect(feed.map((entry) => entry.id)).toEqual(['update_2', 'cmd_1', 'update_1'])
+  })
+
+  it('picks the newest report for the composer strip regardless of API ordering', () => {
+    const updates = [
+      {
+        id: 'update_old',
+        at: 1_000,
+        kind: 'status' as const,
+        title: 'Delegated',
+        body: '',
+        projectPath: null,
+        taskIds: [],
+        authorSessionId: null,
+      },
+      {
+        id: 'update_new',
+        at: 3_000,
+        kind: 'progress' as const,
+        title: 'Two agents running',
+        body: 'Shop and API are covered.',
+        projectPath: '/work/api',
+        taskIds: [],
+        authorSessionId: 'commander',
+      },
+      {
+        id: 'update_mid',
+        at: 2_000,
+        kind: 'done' as const,
+        title: 'Reviewed',
+        body: '',
+        projectPath: null,
+        taskIds: [],
+        authorSessionId: 'commander',
+      },
+    ]
+    expect(latestCommanderUpdate(snapshot({ updates }))?.id).toBe('update_new')
+    expect(latestCommanderUpdate(snapshot())).toBeNull()
+  })
+
+  it('shows plain answers of the main session in the channel feed', () => {
+    const feed = commanderFeed(
+      snapshot({
+        updates: [
+          {
+            id: 'update_1',
+            at: 2_000,
+            kind: 'status',
+            title: 'Two agents running',
+            body: '',
+            projectPath: null,
+            taskIds: [],
+            authorSessionId: null,
+          },
+        ],
+      }),
+      60,
+      [
+        { id: 'reply_1', at: 1_000, text: 'Working on it.' },
+        { id: 'reply_2', at: 3_000, text: 'Both done.' },
+      ],
+    )
+    expect(feed.map((entry) => [entry.type, entry.id])).toEqual([
+      ['reply', 'reply_1'],
+      ['update', 'update_1'],
+      ['reply', 'reply_2'],
+    ])
+  })
+
+  it('keeps the feed honest when no replies have been read yet', () => {
+    const feed = commanderFeed(snapshot())
+    expect(feed).toEqual([])
+    expect(commanderFeed(snapshot(), 60, [])).toEqual([])
+  })
+
+  it('treats a chat answer as the newest message when it came after the report', () => {
+    const updates = [
+      {
+        id: 'update_old',
+        at: 1_000,
+        kind: 'status' as const,
+        title: 'Delegated',
+        body: '',
+        projectPath: null,
+        taskIds: [],
+        authorSessionId: null,
+      },
+    ]
+    const newer = latestCommanderMessage(snapshot({ updates }), [
+      { id: 'reply_new', at: 2_000, text: 'Here is the answer.' },
+    ])
+    expect(newer?.type).toBe('reply')
+    expect(newer).toMatchObject({ type: 'reply', reply: { id: 'reply_new' } })
+
+    const older = latestCommanderMessage(snapshot({ updates }), [
+      { id: 'reply_old', at: 500, text: 'Earlier note.' },
+    ])
+    expect(older?.type).toBe('update')
+  })
+
+  it('falls back to a reply when the commander filed no report at all', () => {
+    const reply = latestCommanderMessage(snapshot(), [
+      { id: 'reply_only', at: 4_000, text: 'Just answering in chat.' },
+    ])
+    expect(reply).toMatchObject({ type: 'reply', reply: { id: 'reply_only' } })
+    expect(latestCommanderMessage(snapshot(), [])).toBeNull()
   })
 })

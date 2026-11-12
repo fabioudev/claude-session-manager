@@ -1,4 +1,4 @@
-import { readFile, readlink } from 'node:fs/promises'
+import { open, readFile, readlink } from 'node:fs/promises'
 import path from 'node:path'
 
 const SHELLS = new Set([
@@ -376,6 +376,58 @@ export function launcherSpec(launcher: string, cwd: string | null): LaunchSpec {
  */
 export function looksLikeTrustPrompt(paneText: string): boolean {
   return /Quick safety check|Yes, I trust this folder/i.test(paneText)
+}
+
+/**
+ * The folders Claude Code has already been trusted for, read from its config
+ * (`<claudeDir>.json`). Trust is per exact folder — trusting a repository does
+ * not cover its subfolders. Returns null when the config cannot be read, so
+ * the caller keeps whatever folder it was given.
+ */
+export async function trustedFolders(claudeDir: string): Promise<Set<string> | null> {
+  try {
+    const raw = await readFile(`${claudeDir}.json`, 'utf8')
+    const parsed = JSON.parse(raw) as {
+      projects?: Record<string, { hasTrustDialogAccepted?: unknown } | undefined>
+    }
+    const trusted = new Set<string>()
+    for (const [folder, entry] of Object.entries(parsed.projects ?? {})) {
+      if (entry?.hasTrustDialogAccepted === true) trusted.add(folder)
+    }
+    return trusted
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The folder a transcript was started in. Claude Code records `cwd` on its
+ * entries and a session can move later on, so the first entry is the one that
+ * names the project the conversation belongs to.
+ */
+export async function transcriptStartDir(file: string): Promise<string | null> {
+  try {
+    const handle = await open(file, 'r')
+    try {
+      const buffer = Buffer.alloc(64 * 1024)
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+      const lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n')
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          const entry = JSON.parse(line) as { cwd?: unknown }
+          if (typeof entry.cwd === 'string' && entry.cwd) return entry.cwd
+        } catch {
+          // The final line of the slice can be cut off; skip unparsable lines.
+        }
+      }
+      return null
+    } finally {
+      await handle.close().catch(() => undefined)
+    }
+  } catch {
+    return null
+  }
 }
 
 export interface LaunchSpec {

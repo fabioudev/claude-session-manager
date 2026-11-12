@@ -1,8 +1,9 @@
-import { Command, LayoutGrid, MessagesSquare, Settings2, WifiOff } from 'lucide-react'
+import { Command, Layers, LayoutGrid, MessagesSquare, Settings2, WifiOff } from 'lucide-react'
 import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { activeCount, boardBuckets } from '../lib/board'
 import { offlineAssignments, visibleQuestions } from '../lib/command'
+import { epicRollups, epicsNeedingHuman } from '../lib/epics'
 import { relativeTime } from '../lib/format'
 import { type ConnectionState, useLive } from '../lib/live'
 import { BrandLockup } from './Brand'
@@ -45,6 +46,11 @@ export function AppShell() {
   const needs = buckets.needs.length + durableNeeds + offlineCount
   const active = activeCount(buckets)
   const commandBadge = commandNeeds > 0 ? commandNeeds : commandActive
+  const epicNeeds = epicsNeedingHuman(
+    epicRollups(commandCenter, sessions).filter(
+      (rollup) => rollup.epic.status !== 'done' && rollup.epic.status !== 'cancelled',
+    ),
+  ).length
   const boardBadge = buckets.needs.length > 0 ? buckets.needs.length : active
   const unread = sessions.reduce((sum, session) => sum + session.unreadMessages, 0)
   const offline = ready && connection === 'offline'
@@ -65,6 +71,18 @@ export function AppShell() {
               }
             >
               {commandBadge > 0 ? commandBadge : ''}
+            </span>
+          </NavLink>
+        </li>
+        <li>
+          <NavLink to="/epics" className={navClass}>
+            <Layers className="nav-icon" size={15} aria-hidden="true" />
+            <span>Epics</span>
+            <span
+              className={epicNeeds > 0 ? 'nav-count needs' : 'nav-count'}
+              title={epicNeeds > 0 ? `${epicNeeds} epics need you` : 'No epic needs you'}
+            >
+              {epicNeeds > 0 ? epicNeeds : ''}
             </span>
           </NavLink>
         </li>

@@ -39,6 +39,13 @@ export function truncate(text: string, max: number): string {
   return `${text.slice(0, Math.max(0, max - 1))}…`
 }
 
+/**
+ * Longest body the manager accepts for a message or typed prompt. A human
+ * command through the command center is a full brief with links and acceptance
+ * criteria, so this is well above a chat message.
+ */
+export const MAX_MESSAGE_LENGTH = 20_000
+
 /** Remove injected XML-ish blocks and command wrappers from a user prompt. */
 export function cleanPrompt(text: string): string {
   let value = text

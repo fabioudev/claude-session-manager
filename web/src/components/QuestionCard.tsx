@@ -6,6 +6,7 @@ import { ApiError, api } from '../api'
 import { countdown, repoLabel, sessionLabel } from '../lib/format'
 import { useLive } from '../lib/live'
 import { useNow } from '../lib/theme'
+import { Markdown } from './Markdown'
 import { useQuestionDialog } from './QuestionDialog'
 import { useToast } from './Toast'
 
@@ -62,7 +63,11 @@ export function QuestionCard({ question }: { question: PendingQuestion }) {
           {question.prompts.length > 1 ? <span>{question.prompts.length} questions</span> : null}
           {question.source === 'transcript' ? <span>From transcript</span> : null}
         </div>
-        <h3 className="question-title">{first?.question || 'A session is waiting for input.'}</h3>
+        {/* Question text is often written as Markdown by the session. */}
+        <Markdown
+          text={first?.question || 'A session is waiting for input.'}
+          className="question-title"
+        />
         {optionPreview ? <p className="question-options-preview">{optionPreview}</p> : null}
       </div>
       <div className="question-actions">

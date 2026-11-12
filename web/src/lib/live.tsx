@@ -39,6 +39,7 @@ interface LiveContextValue {
 const EMPTY_COMMAND_CENTER: CommandCenterSnapshot = {
   commanderSessionId: null,
   tasks: [],
+  epics: [],
   knowledge: [],
   decisions: [],
   commands: [],

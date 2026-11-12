@@ -392,7 +392,7 @@
   font-weight: 560;
 }
 
-.decision-card h3 {
+.decision-question {
   margin-top: 13px;
   font-size: 15px;
   font-weight: 560;
@@ -404,7 +404,22 @@
   color: var(--ink-2);
   font-size: 11.5px;
   line-height: 1.5;
-  white-space: pre-wrap;
+}
+
+/* Headings a session puts in its question stay at card scale, not page-title scale. */
+.decision-card .decision-question h3,
+.decision-card .decision-question h4,
+.decision-card .decision-question h5,
+.decision-card .decision-question h6 {
+  font-size: 14px;
+}
+
+.decision-card .decision-context h3,
+.decision-card .decision-context h4,
+.decision-card .decision-context h5,
+.decision-card .decision-context h6 {
+  margin-top: 0.9em;
+  font-size: 12px;
 }
 
 .decision-card form {
@@ -919,28 +934,18 @@
   font-size: 11px;
 }
 
-/* ---------- commander channel & features in flight ---------- */
+/* ---------- latest report & features in flight ---------- */
 
-.command-feedback {
-  display: grid;
-  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 1fr);
-  gap: 36px;
-  align-items: start;
-}
-
-.commander-channel,
 .feature-overview {
   min-width: 0;
 }
 
-.commander-channel .command-section-head h2,
 .feature-overview .command-section-head h2 {
   display: inline-flex;
   align-items: center;
   gap: 8px;
 }
 
-.commander-channel .command-section-head h2 > svg,
 .feature-overview .command-section-head h2 > svg {
   color: var(--ink-3);
 }
@@ -1083,6 +1088,15 @@
   color: var(--accent);
 }
 
+/* A plain answer from the main session — no report_status, just its chat. */
+.channel-update.channel-reply {
+  border-left-color: var(--ink-2);
+}
+
+.channel-update.channel-reply .channel-kind {
+  color: var(--ink);
+}
+
 .channel-update h3 {
   margin-top: 7px;
   font-size: 13px;
@@ -1143,6 +1157,124 @@
 .channel-refs > button:focus-visible {
   border-color: var(--line-strong);
   color: var(--ink);
+}
+
+/* The single report shown next to the composer; the rest lives in History. */
+.commander-latest {
+  margin-top: 18px;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--ink-2);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.commander-latest.kind-blocked {
+  border-left-color: var(--danger);
+}
+
+.commander-latest.kind-question {
+  border-left-color: var(--accent);
+}
+
+.commander-latest.kind-done {
+  border-left-color: var(--success);
+}
+
+.commander-latest.empty {
+  border-left-style: dashed;
+  border-left-color: var(--line-strong);
+  background: transparent;
+}
+
+.commander-latest-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-3);
+  font-size: 9.5px;
+}
+
+.commander-latest-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commander-latest-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.commander-latest.kind-blocked .channel-kind {
+  color: var(--danger);
+}
+
+.commander-latest.kind-done .channel-kind {
+  color: var(--success);
+}
+
+.commander-latest.kind-question .channel-kind {
+  color: var(--accent);
+}
+
+.commander-latest.kind-reply .channel-kind {
+  color: var(--ink);
+}
+
+.commander-latest-title {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 570;
+  letter-spacing: -0.01em;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.commander-latest-body {
+  max-height: 5.4em;
+  margin-top: 4px;
+  color: var(--ink-2);
+  font-size: 11.5px;
+  line-height: 1.55;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 62%, transparent);
+}
+
+.commander-latest-body.expanded {
+  max-height: none;
+  mask-image: none;
+}
+
+.commander-latest-body .markdown h3,
+.commander-latest-body .markdown h4,
+.commander-latest-body .markdown h5,
+.commander-latest-body .markdown h6 {
+  font-size: 12px;
+}
+
+.commander-latest-empty {
+  margin-top: 5px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+.commander-history-sheet {
+  width: min(860px, calc(100vw - 32px));
+}
+
+.commander-history-body {
+  flex: 1;
+  min-height: 0;
+  padding: 18px 20px 20px;
+  overflow: hidden;
+}
+
+.commander-history-body .channel-feed {
+  max-height: min(68svh, 620px);
 }
 
 .feature-grid {
@@ -1487,13 +1619,12 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .command-feedback {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 34px;
-  }
-
   .channel-feed {
     max-height: 360px;
+  }
+
+  .commander-history-body .channel-feed {
+    max-height: min(62svh, 420px);
   }
 
   .channel-bubble,
@@ -1521,6 +1652,17 @@
 
   .command-console {
     padding: 20px 16px 16px;
+  }
+
+  .commander-latest-head {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .commander-latest-actions {
+    flex-basis: 100%;
+    justify-content: flex-end;
+    margin-left: 0;
   }
 
   .command-console-head h2 {

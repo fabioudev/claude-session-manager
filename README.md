@@ -95,12 +95,19 @@ can plan immediately and calls `get_command_center` only when it wants fresher s
 delegate in the same turn instead of only planning, to accept a new goal for a different project at
 any time, and to keep monitoring what it started.
 
-The **Commander channel** under the command box is the large feedback window: your goals on the
-right, the commander's `report_status` reports on the left, and automatic ledger lines (delegated,
-in progress, ready for review, blocked, completed, waiting on you) in between. It is chronological
-and scrolls to the newest entry. **Features in flight** groups all open tasks by project, with a
+Under the command box sits the newest commander report — one compact card with its status, author,
+time and title. **Show complete** expands a truncated body in place, and **History** opens the full
+conversation in a dialog: your goals on the right, the commander's `report_status` reports on the
+left, and automatic ledger lines (delegated, in progress, ready for review, blocked, completed,
+waiting on you) in between. **Features in flight** groups all open tasks by project, with a
 declared-progress bar, running/review/blocked counts and the individual tasks — so "which feature is
 being worked on, and where does it stand?" is answered without opening anything.
+
+The commander is a dispatcher, not a second worker. Its prompt forbids reading repository code,
+grepping, building, testing, editing files or spawning subagents, and the launcher denies it the
+tools that would execute such work (`--disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit,Task`).
+Facts it does not have belong in a task brief or a delegated read-only discovery task; durable notes
+go through `share_knowledge`, never `curl` against the manager API.
 
 Assignment dispatches the task automatically. `typed` means the prompt was entered into a live
 pane; `queued` means it waits in the session inbox. Neither state proves execution: progress and
@@ -117,6 +124,29 @@ Knowledge is not scraped from conversations. Add it deliberately in the UI or wi
 `share_knowledge`: a title, body, optional tags and an optional absolute project path. Only the
 commander or human can pin an entry into every prompt. Workers can publish unpinned notes for
 their peers. Archived entries remain in the ledger but are no longer injected.
+
+### Epics: one stable page per large goal
+
+A large goal that spans repositories should not live only in the commander chat, where routine
+updates bury it. That is what an **epic** is: a durable record with a title, a goal, the declared
+repositories, an optional preview URL and a deliberately short **status line** the human reads at a
+glance. **Epics** in the rail lists every open epic as a card — status pill, status line,
+repositories, preview link, task rollup and the epic commander — plus a **Braucht dich** strip for
+threads with unanswered questions, results awaiting acceptance and blocked tasks. Open tasks that
+belong to no epic stay visible under **Ohne Epic**.
+
+Tasks carry an `epicId`; the rollup and progress are derived from them, never maintained by hand.
+Each epic has its own thread: write a question or remark there and it is delivered to the epic's
+commander — immediately when it is live, otherwise at its next prompt — and answered in the same
+thread with `post_epic_message`, so the main chat stays a command intake.
+
+The main commander opens epics (`create_epic`), attaches tasks with `epic_id` and starts a
+dedicated **epic commander** per epic with `spawn_epic_commander`. That session owns the epic for
+its lifetime: it plans, splits into tasks, dispatches workers, reviews their results and keeps the
+status line current. Its write access is limited to its own epic and its tasks. The main commander
+keeps intake, cross-epic dispatch and milestones. When an epic commander ends, the epic becomes
+unowned and the main commander is nudged to start a new one; closing an epic (`done` or
+`cancelled`) records `completedAt` and moves it to the closed list.
 
 The command ledger lives in `<dataDir>/command-center.json`, independently of `state.json`, and is
 written atomically. A corrupt file is moved aside before an empty ledger is started. There is no

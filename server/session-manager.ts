@@ -60,6 +60,8 @@ import {
   resolveLaunchSpec,
   restartSupported,
   shellQuote,
+  transcriptStartDir,
+  trustedFolders,
   waitFor,
 } from './restart.js'
 import type { StateStore } from './state-store.js'
@@ -85,6 +87,7 @@ import {
   getGitInfo,
   hashString,
   isoAt,
+  MAX_MESSAGE_LENGTH,
   missionHeadline,
   now,
   oneLine,
@@ -112,7 +115,14 @@ const RESTART_START_TIMEOUT_MS = 10_000
 const RESTART_STABLE_MS = 1_500
 const RESUME_NAME_ATTEMPTS = 20
 const RESUME_OUTPUT_LINES = 40
+/** Long enough for Claude Code to paint either its trust dialog or its input box. */
+const TRUST_PROMPT_TIMEOUT_MS = 8_000
 const MAX_PROMPT_LENGTH = 20000
+/**
+ * A commander must dispatch, not execute. Bash would also let it curl the
+ * manager API and bypass the plugin's tools, so it is denied as well.
+ */
+const COMMANDER_DISALLOWED_TOOLS = ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Task']
 /** A tunnel address older than this is likely dead; only rules stay listed. */
 const PREVIEW_URL_MAX_AGE_MS = 24 * 60 * MINUTE
 const TRUST_PROMPT_NOTE =
@@ -168,6 +178,8 @@ export interface SessionManagerOptions {
     contextFor: (sessionId: string, reason: 'start' | 'prompt') => string | null
     /** The session id the command center currently treats as its commander. */
     commanderSessionId: () => string | null
+    /** A worker that held open tasks went away; the commander should re-plan. */
+    sessionEnded?: (sessionId: string) => void
   }
 }
 
@@ -691,6 +703,10 @@ export class SessionManager {
         runtime.awaitingAnswerAt = null
         this.broker.cancelForSession(sessionId, 'terminal')
         this.store.setEnded(sessionId, clientAt)
+        // A worker that still holds open tasks cannot finish them now. Waking
+        // the commander here is what makes "the commander handles it" true
+        // without the human watching the board.
+        this.orchestration?.sessionEnded?.(sessionId)
         this.scheduleRecompute(0)
         return { output: null }
       }
@@ -757,7 +773,8 @@ export class SessionManager {
   ): SessionMessage {
     const body = input.body?.trim()
     if (!body) throw new Error('Message body must not be empty')
-    if (body.length > 8000) throw new Error('Message body is too long (max 8000 characters)')
+    if (body.length > MAX_MESSAGE_LENGTH)
+      throw new Error(`Message body is too long (max ${MAX_MESSAGE_LENGTH} characters)`)
     const kind = input.kind === 'question' || input.kind === 'answer' ? input.kind : 'note'
     const fromSessionId = sender?.sessionId ?? null
     const toSessionId = input.toSessionId ?? null
@@ -995,6 +1012,9 @@ export class SessionManager {
     } catch {
       return { ok: false, error: 'Working directory does not exist' }
     }
+    // An untrusted folder would stop at Claude Code's trust dialog instead of
+    // doing the work; start in the nearest trusted parent instead.
+    const launchCwd = await this.launchCwd(cwd)
     const allowedModes = new Set([
       'acceptEdits',
       'auto',
@@ -1031,14 +1051,15 @@ export class SessionManager {
 
     // Start through the configured launcher, so a wrapper that carries auth or
     // a default model (an Ollama launch, an env prefix) works here too.
-    const launcher = dropRootBlockedFlags(launcherSpec(settings.sessionLauncher, cwd)).spec.prefix
+    const launcher = dropRootBlockedFlags(launcherSpec(settings.sessionLauncher, launchCwd)).spec
+      .prefix
     const bin = launcher[0] ?? this.claudeBin
     const launcherArgs = launcher.slice(1)
 
     const startedAt = now()
     try {
       const { stdout, stderr } = await execFileAsync(bin, [...launcherArgs, ...args], {
-        cwd,
+        cwd: launchCwd,
         timeout: 60_000,
         maxBuffer: 4 * 1024 * 1024,
         env,
@@ -1056,7 +1077,7 @@ export class SessionManager {
           (candidate) =>
             (jobId && (candidate.jobId === jobId || candidate.sessionId === jobId)) ||
             ((candidate.updatedAt ?? 0) >= startedAt - 5000 &&
-              candidate.cwd === cwd &&
+              candidate.cwd === launchCwd &&
               (!input.name || candidate.name === input.name.trim())),
         )
       this.scheduleRecompute(0)
@@ -1074,6 +1095,39 @@ export class SessionManager {
       )
       return { ok: false, error: detail }
     }
+  }
+
+  /**
+   * A fresh session in a folder Claude Code has not been trusted for stops at
+   * its safety prompt and never runs. The parent project is usually trusted
+   * and still lets the session work in the subfolder, so walk up to the nearest
+   * trusted folder instead of failing the launch.
+   */
+  private async launchCwd(wanted: string): Promise<string> {
+    const trusted = await trustedFolders(this.config.claudeDir)
+    if (!trusted) return wanted
+    let dir = wanted
+    while (!trusted.has(dir)) {
+      const parent = path.dirname(dir)
+      if (parent === dir) return wanted
+      dir = parent
+    }
+    return dir
+  }
+
+  /**
+   * The board remembers the project a session last worked in, but Claude Code
+   * only works in folders it has been trusted for, and its trust dialog
+   * defaults to "No, exit". Resuming there would end the session the moment
+   * the first prompt arrives, so an untrusted folder falls back to the one
+   * that owns the transcript.
+   */
+  private async resumeCwd(sessionId: string, wanted: string): Promise<string> {
+    const trusted = await trustedFolders(this.config.claudeDir)
+    if (!trusted || trusted.has(wanted)) return wanted
+    const file = this.transcripts.pathFor(sessionId)
+    const owner = file ? await transcriptStartDir(file) : null
+    return owner && trusted.has(owner) ? owner : wanted
   }
 
   /**
@@ -1097,7 +1151,12 @@ export class SessionManager {
     if (input.resumeSessionId && !/^[0-9a-zA-Z_-]{8,80}$/.test(input.resumeSessionId)) {
       return { ok: false, error: 'Invalid session id' }
     }
-    const cwd = path.resolve(expandHome(input.cwd?.trim() || process.cwd()))
+    const wanted = path.resolve(expandHome(input.cwd?.trim() || process.cwd()))
+    // A resume must land in a folder Claude Code is allowed to work in, or the
+    // trust dialog swallows the first prompt and ends the session.
+    const cwd = input.resumeSessionId
+      ? await this.resumeCwd(input.resumeSessionId, wanted)
+      : await this.launchCwd(wanted)
     try {
       if (!(await stat(cwd)).isDirectory()) {
         return { ok: false, error: 'Working directory is not a directory' }
@@ -1112,6 +1171,10 @@ export class SessionManager {
     const argv = [...spec.prefix, ...spec.args]
     if (input.resumeSessionId) argv.push('--resume', input.resumeSessionId)
     else if (input.name?.trim()) argv.push('--name', input.name.trim().slice(0, 80))
+    // The commander dispatches and verifies. Denying the tools that execute
+    // work keeps it from becoming a second worker: it must delegate instead of
+    // editing files, running commands or spawning subagents itself.
+    argv.push('--disallowedTools', COMMANDER_DISALLOWED_TOOLS.join(','))
     const command = spec.cwd
       ? `cd ${shellQuote(spec.cwd)} && ${argv.map(shellQuote).join(' ')}`
       : argv.map(shellQuote).join(' ')
@@ -1153,7 +1216,16 @@ export class SessionManager {
     if (!settled?.command || isShellCommand(settled.command)) {
       return await fail('Claude Code exited right after starting.')
     }
-    if (looksLikeTrustPrompt((await capturePane(pane, RESUME_OUTPUT_LINES)) ?? '')) {
+    // The trust dialog renders a moment after the process starts. Typing
+    // before it is on screen sends the prompt into it, and its default answer
+    // ("No, exit") ends the session instead of starting it — so wait for
+    // either the dialog or the input box before pasting anything.
+    let settling = ''
+    const ready = await waitFor(async () => {
+      settling = (await capturePane(pane, RESUME_OUTPUT_LINES)) ?? ''
+      return looksLikeTrustPrompt(settling) || settling.includes('❯')
+    }, TRUST_PROMPT_TIMEOUT_MS)
+    if (ready && looksLikeTrustPrompt(settling)) {
       return { ok: true, output: TRUST_PROMPT_NOTE }
     }
     if (!(await this.submitPrompt(pane, prompt))) {
@@ -1529,7 +1601,10 @@ export class SessionManager {
     if (!this.transcripts.has(id) && !(await this.transcripts.ensureLoaded(id))) {
       return { ok: false, error: 'This session has no conversation to resume.' }
     }
-    const cwd = spec.cwd ?? (session.projectPath || null)
+    const wanted = spec.cwd ?? (session.projectPath || null)
+    // Same guard as the commander: a resume in a folder Claude Code has not
+    // been trusted for stops at its safety prompt and never runs.
+    const cwd = wanted ? await this.resumeCwd(id, wanted) : null
 
     this.resuming.add(id)
     try {

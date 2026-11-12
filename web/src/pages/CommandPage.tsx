@@ -1,5 +1,7 @@
 import type {
+  ActivityEvent,
   CommandCenterSnapshot,
+  CommanderUpdate,
   CommanderUpdateKind,
   DecisionRequest,
   DelegatedTask,
@@ -16,6 +18,7 @@ import {
   CircleAlert,
   Clock3,
   Command,
+  History,
   ListPlus,
   LoaderCircle,
   MessageCircle,
@@ -33,9 +36,11 @@ import { QuestionCard } from '../components/QuestionCard'
 import { useToast } from '../components/Toast'
 import {
   activeKnowledge,
+  type CommanderReply,
   commanderFeed,
   commandStats,
   featureGroups,
+  latestCommanderMessage,
   offlineAssignments,
   taskColumns,
   visibleQuestions,
@@ -51,15 +56,78 @@ function CommanderPanel({
   commandCenter,
   sessions,
   config,
+  onOpenTask,
 }: {
   commandCenter: CommandCenterSnapshot
   sessions: SessionSummary[]
   config: PublicConfig | null
+  onOpenTask: (taskId: string) => void
 }) {
   const { notify } = useToast()
   const [text, setText] = useState('')
   const [pending, setPending] = useState(false)
-  const commander = sessions.find((session) => session.id === commandCenter.commanderSessionId)
+  const [showHistory, setShowHistory] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  const [clipped, setClipped] = useState(false)
+  const [replies, setReplies] = useState<CommanderReply[]>([])
+  const reportBody = useRef<HTMLDivElement>(null)
+  const commanderSessionId = commandCenter.commanderSessionId
+  const commander = sessions.find((session) => session.id === commanderSessionId)
+  const latest = useMemo(
+    () => latestCommanderMessage(commandCenter, replies),
+    [commandCenter, replies],
+  )
+  const latestKey =
+    latest === null ? null : latest.type === 'update' ? latest.update.id : latest.reply.id
+
+  // The commander answers in its own chat far more often than it files a
+  // report, and those answers were invisible here: the strip only knew about
+  // report_status. Read its newest replies from the session detail as well.
+  const commanderActivityAt = commander?.lastActivityAt ?? 0
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refetch when the session answers
+  useEffect(() => {
+    if (!commanderSessionId) {
+      setReplies([])
+      return
+    }
+    let cancelled = false
+    api
+      .session(commanderSessionId)
+      .then((detail) => {
+        if (cancelled) return
+        setReplies(
+          detail.activities
+            .filter((activity) => activity.kind === 'response')
+            .map((activity: ActivityEvent) => ({
+              id: activity.id,
+              at: activity.at,
+              text: (activity.detail || activity.title || '').trim(),
+            }))
+            .filter((reply) => reply.text.length > 0)
+            .slice(-40),
+        )
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [commanderSessionId, commanderActivityAt])
+
+  // A new message collapses back to the compact excerpt.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the message changes
+  useEffect(() => {
+    setExpanded(false)
+  }, [latestKey])
+
+  // Offer "Show complete" only when the excerpt actually hides text.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: measure the clamped node after it renders
+  useEffect(() => {
+    const node = reportBody.current
+    if (!node || expanded) return
+    setClipped(node.scrollHeight > node.clientHeight + 1)
+  }, [latestKey, expanded])
+  const latestUpdate = latest?.type === 'update' ? latest.update : null
+  const latestReply = latest?.type === 'reply' ? latest.reply : null
   const commanderLive = Boolean(commander?.live && commander.status !== 'ended')
   const candidates = sessions.filter((session) => session.live && session.status !== 'ended')
   const commanderOffline =
@@ -161,6 +229,81 @@ function CommanderPanel({
             </button>
           </div>
         </form>
+
+        <div
+          className={`commander-latest${
+            latestUpdate ? ` kind-${latestUpdate.kind}` : latestReply ? ' kind-reply' : ' empty'
+          }`}
+        >
+          <div className="commander-latest-head">
+            <span className="channel-kind">
+              {latestUpdate ? UPDATE_LABEL[latestUpdate.kind] : latestReply ? 'Reply' : 'Channel'}
+            </span>
+            <span className="commander-latest-meta">
+              {latestUpdate
+                ? `${updateAuthorLabel(latestUpdate, sessions)} · ${relativeTime(latestUpdate.at)}`
+                : latestReply
+                  ? `${commander ? sessionLabel(commander) : 'Main session'} · ${relativeTime(latestReply.at)}`
+                  : 'No reports yet'}
+            </span>
+            <div className="commander-latest-actions">
+              {clipped ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => setExpanded((value) => !value)}
+                  aria-expanded={expanded}
+                  aria-controls="commander-latest-body"
+                >
+                  {expanded ? 'Show less' : 'Show complete'}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setShowHistory(true)}
+              >
+                <History size={13} aria-hidden="true" /> History
+              </button>
+            </div>
+          </div>
+          {latestUpdate ? (
+            <>
+              <h3 className="commander-latest-title">{latestUpdate.title}</h3>
+              {latestUpdate.body ? (
+                <div
+                  id="commander-latest-body"
+                  ref={reportBody}
+                  className={`commander-latest-body${expanded ? ' expanded' : ''}`}
+                >
+                  <Markdown text={latestUpdate.body} />
+                </div>
+              ) : null}
+            </>
+          ) : latestReply ? (
+            <div
+              id="commander-latest-body"
+              ref={reportBody}
+              className={`commander-latest-body${expanded ? ' expanded' : ''}`}
+            >
+              <Markdown text={latestReply.text} />
+            </div>
+          ) : (
+            <p className="commander-latest-empty">
+              Your main session will answer here once you give it a goal.
+            </p>
+          )}
+        </div>
+
+        {showHistory ? (
+          <CommanderHistoryDialog
+            commandCenter={commandCenter}
+            sessions={sessions}
+            replies={replies}
+            onOpenTask={onOpenTask}
+            onClose={() => setShowHistory(false)}
+          />
+        ) : null}
       </div>
 
       <aside className="commander-card" aria-label="Main session">
@@ -241,23 +384,30 @@ function projectName(projectPath: string | null): string {
   return parts[parts.length - 1] || projectPath
 }
 
+function updateAuthorLabel(update: CommanderUpdate, sessions: SessionSummary[]): string {
+  if (update.authorSessionId === null) return 'Ledger'
+  const author = sessions.find((session) => session.id === update.authorSessionId)
+  return author ? sessionLabel(author) : 'Commander'
+}
+
 /**
- * The conversation with the main session: human goals on the right, the
- * commander's reports on the left, ledger events in between. This is the
- * "large feedback window" — it is meant to be read, not clicked through.
+ * The full conversation with the main session: human goals on the right, the
+ * commander's reports on the left, ledger events in between. It lives behind
+ * the History button so the composer stays a single, calm answer.
  */
-function CommanderChannel({
+function ChannelFeed({
   commandCenter,
   sessions,
+  replies,
   onOpenTask,
 }: {
   commandCenter: CommandCenterSnapshot
   sessions: SessionSummary[]
+  replies: CommanderReply[]
   onOpenTask: (taskId: string) => void
 }) {
-  const feed = useMemo(() => commanderFeed(commandCenter), [commandCenter])
+  const feed = useMemo(() => commanderFeed(commandCenter, 60, replies), [commandCenter, replies])
   const feedRef = useRef<HTMLDivElement>(null)
-  const commander = sessions.find((session) => session.id === commandCenter.commanderSessionId)
 
   // Newest report at the bottom, the way a conversation reads. The scroll
   // target is a ref, so the feed length is the only proxy for "something new".
@@ -268,97 +418,168 @@ function CommanderChannel({
   }, [feed.length])
 
   return (
-    <section className="commander-channel" aria-labelledby="commander-channel-title">
-      <div className="command-section-head">
-        <div>
-          <h2 id="commander-channel-title">
-            <MessageCircle size={19} strokeWidth={1.6} aria-hidden="true" /> Commander channel
-          </h2>
-          <p>
-            {commander
-              ? `${sessionLabel(commander)} reports what is running and when it needs you.`
-              : 'Your main session reports here once you give it a goal.'}
-          </p>
-        </div>
-        <span className="channel-count">
-          {commandCenter.updates.length} {commandCenter.updates.length === 1 ? 'report' : 'reports'}
-        </span>
-      </div>
-
-      <section className="channel-feed" ref={feedRef} aria-label="Commander channel messages">
-        {feed.length === 0 ? (
-          <div className="channel-empty">
-            <MessageCircle size={24} strokeWidth={1.3} aria-hidden="true" />
-            <div>
-              <strong>The channel is quiet.</strong>
-              <p>
-                Give your main session a goal above. It delegates first and then reports back here —
-                you can keep working on something else in the meantime.
-              </p>
-            </div>
+    <section className="channel-feed" ref={feedRef} aria-label="Commander channel messages">
+      {feed.length === 0 ? (
+        <div className="channel-empty">
+          <MessageCircle size={24} strokeWidth={1.3} aria-hidden="true" />
+          <div>
+            <strong>The channel is quiet.</strong>
+            <p>
+              Give your main session a goal in the composer. It delegates first and then reports
+              back here — you can keep working on something else in the meantime.
+            </p>
           </div>
-        ) : (
-          feed.map((entry) =>
-            entry.type === 'command' ? (
-              <article className="channel-command" key={entry.id}>
-                <div className="channel-bubble">
-                  <p>{entry.text}</p>
-                  <span>
-                    You · {relativeTime(entry.at)} ·{' '}
-                    {entry.ok
-                      ? entry.mode === 'typed'
-                        ? 'delivered'
-                        : 'queued'
-                      : 'delivery failed'}
-                  </span>
+        </div>
+      ) : (
+        feed.map((entry) =>
+          entry.type === 'command' ? (
+            <article className="channel-command" key={entry.id}>
+              <div className="channel-bubble">
+                <p>{entry.text}</p>
+                <span>
+                  You · {relativeTime(entry.at)} ·{' '}
+                  {entry.ok ? (entry.mode === 'typed' ? 'delivered' : 'queued') : 'delivery failed'}
+                </span>
+              </div>
+            </article>
+          ) : entry.type === 'reply' ? (
+            <article className="channel-update channel-reply" key={entry.id}>
+              <header>
+                <span className="channel-kind">Reply</span>
+                <span>Main session · {relativeTime(entry.at)}</span>
+              </header>
+              <div className="channel-body">
+                <Markdown text={entry.text} />
+              </div>
+            </article>
+          ) : (
+            <article
+              className={`channel-update kind-${entry.update.kind}${entry.update.authorSessionId === null ? ' system' : ''}`}
+              key={entry.id}
+            >
+              <header>
+                <span className="channel-kind">{UPDATE_LABEL[entry.update.kind]}</span>
+                <span>
+                  {entry.update.authorSessionId === null
+                    ? 'Ledger'
+                    : (() => {
+                        const author = sessions.find(
+                          (session) => session.id === entry.update.authorSessionId,
+                        )
+                        return author ? sessionLabel(author) : 'Commander'
+                      })()}{' '}
+                  · {relativeTime(entry.at)}
+                </span>
+              </header>
+              <h3>{entry.update.title}</h3>
+              {entry.update.body ? (
+                <div className="channel-body">
+                  <Markdown text={entry.update.body} />
                 </div>
-              </article>
-            ) : (
-              <article
-                className={`channel-update kind-${entry.update.kind}${entry.update.authorSessionId === null ? ' system' : ''}`}
-                key={entry.id}
-              >
-                <header>
-                  <span className="channel-kind">{UPDATE_LABEL[entry.update.kind]}</span>
-                  <span>
-                    {entry.update.authorSessionId === null
-                      ? 'Ledger'
-                      : (() => {
-                          const author = sessions.find(
-                            (session) => session.id === entry.update.authorSessionId,
-                          )
-                          return author ? sessionLabel(author) : 'Commander'
-                        })()}{' '}
-                    · {relativeTime(entry.at)}
-                  </span>
-                </header>
-                <h3>{entry.update.title}</h3>
-                {entry.update.body ? (
-                  <div className="channel-body">
-                    <Markdown text={entry.update.body} />
-                  </div>
-                ) : null}
-                {entry.update.projectPath || entry.update.taskIds.length ? (
-                  <div className="channel-refs">
-                    {entry.update.projectPath ? (
-                      <span>{projectName(entry.update.projectPath)}</span>
-                    ) : null}
-                    {entry.update.taskIds.map((taskId) => {
-                      const task = commandCenter.tasks.find((candidate) => candidate.id === taskId)
-                      return (
-                        <button type="button" key={taskId} onClick={() => onOpenTask(taskId)}>
-                          {task ? task.title : taskId}
-                        </button>
-                      )
-                    })}
-                  </div>
-                ) : null}
-              </article>
-            ),
-          )
-        )}
-      </section>
+              ) : null}
+              {entry.update.projectPath || entry.update.taskIds.length ? (
+                <div className="channel-refs">
+                  {entry.update.projectPath ? (
+                    <span>{projectName(entry.update.projectPath)}</span>
+                  ) : null}
+                  {entry.update.taskIds.map((taskId) => {
+                    const task = commandCenter.tasks.find((candidate) => candidate.id === taskId)
+                    return (
+                      <button type="button" key={taskId} onClick={() => onOpenTask(taskId)}>
+                        {task ? task.title : taskId}
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : null}
+            </article>
+          ),
+        )
+      )}
     </section>
+  )
+}
+
+/**
+ * The full channel in a modal: opened from the composer so the page itself
+ * shows only the newest report.
+ */
+function CommanderHistoryDialog({
+  commandCenter,
+  sessions,
+  replies,
+  onOpenTask,
+  onClose,
+}: {
+  commandCenter: CommandCenterSnapshot
+  sessions: SessionSummary[]
+  replies: CommanderReply[]
+  onOpenTask: (taskId: string) => void
+  onClose: () => void
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (dialog && !dialog.open) dialog.showModal()
+    // The feed scrolls itself on mount, but a closed <dialog> has no layout,
+    // so that first scroll lands at 0 and the history opened at the oldest
+    // message. Repeat it once the dialog is rendered, so the newest entry is
+    // the one in view.
+    const feed = dialog?.querySelector<HTMLElement>('.channel-feed')
+    const frame = feed
+      ? requestAnimationFrame(() => {
+          feed.scrollTop = feed.scrollHeight
+        })
+      : 0
+    return () => {
+      if (frame) cancelAnimationFrame(frame)
+      if (dialog?.open) dialog.close()
+    }
+  }, [])
+
+  function close() {
+    dialogRef.current?.close()
+  }
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="sheet commander-history-sheet"
+      aria-labelledby="commander-history-title"
+      onCancel={(event) => {
+        event.preventDefault()
+        close()
+      }}
+      onClose={onClose}
+    >
+      <div className="sheet-head">
+        <div>
+          <div className="sheet-kicker">
+            <span>Commander channel</span>
+            <span>
+              {commandCenter.updates.length}{' '}
+              {commandCenter.updates.length === 1 ? 'report' : 'reports'}
+            </span>
+          </div>
+          <h2 className="sheet-title" id="commander-history-title">
+            Conversation with your main session
+          </h2>
+          <p className="sheet-sub">Every goal you sent and every report that came back.</p>
+        </div>
+        <button type="button" className="icon-btn" onClick={close} aria-label="Close history">
+          <X size={17} aria-hidden="true" />
+        </button>
+      </div>
+      <div className="commander-history-body">
+        <ChannelFeed
+          commandCenter={commandCenter}
+          sessions={sessions}
+          replies={replies}
+          onOpenTask={onOpenTask}
+        />
+      </div>
+    </dialog>
   )
 }
 
@@ -486,8 +707,9 @@ function DecisionCard({
           <span>asked {relativeTime(decision.createdAt)}</span>
         </div>
       </div>
-      <h3>{decision.question}</h3>
-      {decision.context ? <p className="decision-context">{decision.context}</p> : null}
+      {/* Sessions write these in Markdown — headings, lists, code, links. */}
+      <Markdown text={decision.question} className="decision-question" />
+      {decision.context ? <Markdown text={decision.context} className="decision-context" /> : null}
       <form onSubmit={resolve}>
         <label className="sr-only" htmlFor={`answer-${decision.id}`}>
           Answer to {decision.question}
@@ -905,7 +1127,12 @@ export function CommandPage() {
         </div>
       </section>
 
-      <CommanderPanel commandCenter={commandCenter} sessions={sessions} config={config} />
+      <CommanderPanel
+        commandCenter={commandCenter}
+        sessions={sessions}
+        config={config}
+        onOpenTask={setSelectedTaskId}
+      />
 
       <section className="command-stats" aria-label="Command center summary">
         <div>
@@ -930,14 +1157,7 @@ export function CommandPage() {
         </div>
       </section>
 
-      <div className="command-feedback">
-        <CommanderChannel
-          commandCenter={commandCenter}
-          sessions={sessions}
-          onOpenTask={setSelectedTaskId}
-        />
-        <FeaturesInFlight tasks={commandCenter.tasks} onOpenTask={setSelectedTaskId} />
-      </div>
+      <FeaturesInFlight tasks={commandCenter.tasks} onOpenTask={setSelectedTaskId} />
 
       <section className="command-needs" aria-labelledby="command-needs-title">
         <div className="command-section-head">

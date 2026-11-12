@@ -439,6 +439,73 @@ export type DelegatedTaskStatus =
 
 export type DelegatedTaskPriority = 'low' | 'normal' | 'high' | 'urgent'
 
+/**
+ * A larger goal the human handed to the commander, split into delegated tasks
+ * across one or more repositories. The epic is the stable unit of overview:
+ * it owns the short status line, the thread with the human, and the rollup of
+ * its tasks. It never replaces the tasks — it groups them.
+ */
+export type EpicStatus = 'active' | 'paused' | 'blocked' | 'done' | 'cancelled'
+
+export type EpicMessageKind = 'question' | 'note' | 'answer' | 'status'
+
+export interface EpicMessage {
+  id: string
+  at: number
+  /** null for system lines such as a status change. */
+  authorSessionId: string | null
+  kind: EpicMessageKind
+  body: string
+  /** Set once the epic owner was actually handed a human message. */
+  deliveredAt: number | null
+}
+
+export interface Epic {
+  id: string
+  title: string
+  /** Why this exists and what "done" means, in the commander's words. */
+  goal: string
+  status: EpicStatus
+  /** One or two sentences for the overview; kept short on purpose. */
+  statusLine: string | null
+  /** Absolute project directories this epic touches. */
+  repositories: string[]
+  /** Preview the epic or one of its sessions exposes. */
+  previewUrl: string | null
+  /** The epic commander; null while the main commander runs it directly. */
+  ownerSessionId: string | null
+  createdBySessionId: string | null
+  revision: number
+  createdAt: number
+  updatedAt: number
+  completedAt: number | null
+  messages: EpicMessage[]
+}
+
+export interface EpicInput {
+  title: string
+  goal?: string
+  repositories?: string[]
+  previewUrl?: string | null
+  ownerSessionId?: string | null
+}
+
+export interface EpicPatch {
+  title?: string
+  goal?: string
+  status?: EpicStatus
+  statusLine?: string | null
+  repositories?: string[]
+  previewUrl?: string | null
+  ownerSessionId?: string | null
+  expectedRevision?: number
+}
+
+export interface EpicMessageInput {
+  body: string
+  kind?: EpicMessageKind
+}
+
 export interface TaskActivity {
   id: string
   at: number
@@ -458,6 +525,8 @@ export interface DelegatedTask {
   assigneeSessionId: string | null
   createdBySessionId: string | null
   projectPath: string | null
+  /** The epic this task belongs to; null for standalone work. */
+  epicId: string | null
   lastNote: string | null
   result: string | null
   lastDispatch: PromptResult | null
@@ -474,6 +543,7 @@ export interface DelegatedTaskInput {
   priority?: DelegatedTaskPriority
   assigneeSessionId?: string | null
   projectPath?: string | null
+  epicId?: string | null
 }
 
 export interface DelegatedTaskPatch {
@@ -484,6 +554,7 @@ export interface DelegatedTaskPatch {
   progress?: number
   assigneeSessionId?: string | null
   projectPath?: string | null
+  epicId?: string | null
   note?: string
   result?: string
   expectedRevision?: number
@@ -557,6 +628,8 @@ export interface CommanderUpdate {
   title: string
   body: string
   projectPath: string | null
+  /** The epic this report is about, when it belongs to one. */
+  epicId: string | null
   taskIds: string[]
   authorSessionId: string | null
 }
@@ -566,12 +639,14 @@ export interface CommanderUpdateInput {
   title: string
   body: string
   projectPath?: string | null
+  epicId?: string | null
   taskIds?: string[]
 }
 
 export interface CommandCenterSnapshot {
   commanderSessionId: string | null
   tasks: DelegatedTask[]
+  epics: Epic[]
   knowledge: KnowledgeEntry[]
   decisions: DecisionRequest[]
   commands: CommanderCommand[]

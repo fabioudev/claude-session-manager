@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OrchestrationService } from '../server/orchestration.js'
+import { MAX_MESSAGE_LENGTH } from '../server/util.js'
 import type {
   DelegatedTask,
   LaunchSessionInput,
@@ -22,6 +23,7 @@ interface HarnessOptions {
   /** Leave the command center without a commander, as a fresh install is. */
   autoCommander?: boolean
   launchCommander?: (input: LaunchSessionInput) => Promise<LaunchSessionResult>
+  launchSession?: (input: LaunchSessionInput) => Promise<LaunchSessionResult>
 }
 
 async function harness(
@@ -47,6 +49,7 @@ async function harness(
       return sendPrompt?.(id, text) ?? { ok: true, mode: 'typed', note: 'Delivered now.' }
     },
     launchCommander: options.launchCommander,
+    launchSession: options.launchSession,
     listSessions: () => [...sessions.values()],
     commanderCwd: '/work',
     onChange: vi.fn(),
@@ -331,6 +334,116 @@ describe('OrchestrationService commander updates', () => {
   })
 })
 
+describe('OrchestrationService spawning workers', () => {
+  it('starts a new session for a task instead of leaving it queued', async () => {
+    const launchSession = vi.fn(
+      async (_input: LaunchSessionInput): Promise<LaunchSessionResult> => ({
+        ok: true,
+        sessionId: 'worker-new',
+        jobId: 'job-new',
+      }),
+    )
+    const { service } = await harness(undefined, { launchSession })
+
+    const task = await service.spawnTask(
+      {
+        title: 'Partner portal balance',
+        brief: 'Show the credit balance on the partner page.',
+        projectPath: '/work/partners',
+      },
+      'commander',
+    )
+
+    expect(launchSession).toHaveBeenCalledOnce()
+    const input = launchSession.mock.calls[0][0]
+    expect(input.cwd).toBe('/work/partners')
+    expect(input.prompt).toContain(`[Delegated task ${task.id}]`)
+    expect(input.prompt).toContain('Show the credit balance on the partner page.')
+    expect(task).toMatchObject({
+      status: 'in_progress',
+      assigneeSessionId: 'worker-new',
+      projectPath: '/work/partners',
+    })
+    expect(task.activities.at(-1)?.text).toContain('Started as a new session')
+  })
+
+  it('blocks the task when no session could be started', async () => {
+    const launchSession = vi.fn(
+      async (_input: LaunchSessionInput): Promise<LaunchSessionResult> => ({
+        ok: false,
+        error: 'Launching sessions is disabled',
+      }),
+    )
+    const { service } = await harness(undefined, { launchSession })
+
+    const task = await service.spawnTask(
+      { title: 'Doomed', brief: 'Try anyway.', projectPath: '/work/partners' },
+      'commander',
+    )
+
+    expect(task.status).toBe('blocked')
+    expect(task.lastNote).toBe('Launching sessions is disabled')
+    expect(task.assigneeSessionId).toBeNull()
+  })
+
+  it('needs a project directory and commander rights', async () => {
+    const launchSession = vi.fn()
+    const { service } = await harness(undefined, { launchSession })
+
+    await expect(
+      service.spawnTask({ title: 'No project', brief: 'Missing path.' }, 'commander'),
+    ).rejects.toMatchObject({ code: 'project_required' })
+    await expect(
+      service.spawnTask(
+        { title: 'Worker call', brief: 'Not allowed.', projectPath: '/work/app' },
+        'worker',
+      ),
+    ).rejects.toMatchObject({ code: 'commander_required' })
+    expect(launchSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('OrchestrationService orphaned tasks', () => {
+  it('wakes the commander with the tasks a finished session still held', async () => {
+    const { service, deliveries } = await harness()
+    const task = await assignedTask(service)
+    deliveries.length = 0
+
+    await service.sessionEnded('worker')
+
+    expect(deliveries).toHaveLength(1)
+    expect(deliveries[0].id).toBe('commander')
+    expect(deliveries[0].text).toContain('worker')
+    expect(deliveries[0].text).toContain(task.id)
+    expect(deliveries[0].text).toContain(task.title)
+    expect(deliveries[0].text).toContain('spawn_task')
+  })
+
+  it('stays quiet when the session held nothing open or the commander itself ended', async () => {
+    const { service, deliveries } = await harness()
+    const task = await assignedTask(service)
+    await service.updateTask(task.id, { status: 'cancelled' }, 'commander')
+    deliveries.length = 0
+
+    await service.sessionEnded('worker')
+    await service.sessionEnded('commander')
+    await service.sessionEnded('nobody')
+
+    expect(deliveries).toHaveLength(0)
+  })
+
+  it('does not wake the commander in read-only mode', async () => {
+    const { service, deliveries, setReadOnly } = await harness()
+    await assignedTask(service)
+    deliveries.length = 0
+    setReadOnly(true)
+
+    await service.sessionEnded('worker')
+
+    expect(deliveries).toHaveLength(0)
+  })
+})
+
 describe('OrchestrationService commands and decisions', () => {
   it('sends human goals to the commander with orchestration instructions and records delivery', async () => {
     const { service, deliveries } = await harness()
@@ -340,6 +453,16 @@ describe('OrchestrationService commands and decisions', () => {
     expect(deliveries[0].text).toContain('create_task')
     expect(command.text).toBe('Coordinate the next release.')
     expect(service.snapshot().commands[0].id).toBe(command.id)
+  })
+
+  it('sends a maximum-length command as one message instead of failing', async () => {
+    const { service, deliveries } = await harness()
+    const goal = 'y'.repeat(12_000)
+    await service.command(goal)
+    // The 8k message cap used to turn a long command into an "Internal server
+    // error"; the prompt must fit in one deliverable message now.
+    expect(deliveries[0].text.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH)
+    expect(deliveries[0].text.endsWith(goal)).toBe(true)
   })
 
   it('starts a dedicated commander with the first command when none is selected', async () => {
@@ -669,6 +792,7 @@ describe('OrchestrationService knowledge and safety', () => {
     expect(service.snapshot()).toEqual({
       commanderSessionId: null,
       tasks: [],
+      epics: [],
       knowledge: [],
       decisions: [],
       commands: [],

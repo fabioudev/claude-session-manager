@@ -14,6 +14,7 @@ import { ApiError, api } from '../api'
 import { countdown, repoLabel, sessionLabel } from '../lib/format'
 import { useLive } from '../lib/live'
 import { useNow } from '../lib/theme'
+import { Markdown } from './Markdown'
 import { useToast } from './Toast'
 
 interface QuestionDialogContextValue {
@@ -201,7 +202,7 @@ function QuestionSheet({ question, onClose }: { question: PendingQuestion; onClo
                     {index + 1} of {question.prompts.length}
                   </span>
                 </div>
-                <h3 className="prompt-question">{prompt.question}</h3>
+                <Markdown text={prompt.question} className="prompt-question" />
                 {prompt.multiSelect ? <p className="prompt-multi">Select one or more.</p> : null}
                 <div className="options">
                   {prompt.options.map((option) => {

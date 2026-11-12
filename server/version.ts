@@ -1,5 +1,5 @@
 /**
  * Kept in sync with package.json. A unit test asserts the two match.
  */
-export const VERSION = '0.1.2'
+export const VERSION = '0.1.3'
 export const USER_AGENT = `claude-session-manager/${VERSION}`

@@ -5,6 +5,8 @@ import { useLive } from './lib/live'
 import { BoardPage } from './pages/BoardPage'
 import { CommandPage } from './pages/CommandPage'
 import { CoordinationPage } from './pages/CoordinationPage'
+import { EpicPage } from './pages/EpicPage'
+import { EpicsPage } from './pages/EpicsPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { SessionPage } from './pages/SessionPage'
 import { SettingsPage } from './pages/SettingsPage'
@@ -19,6 +21,8 @@ export function App() {
     <Routes>
       <Route element={<AppShell />}>
         <Route index element={<CommandPage />} />
+        <Route path="epics" element={<EpicsPage />} />
+        <Route path="epics/:id" element={<EpicPage />} />
         <Route path="sessions" element={<BoardPage />} />
         <Route path="sessions/:id" element={<SessionPage />} />
         <Route path="coordination" element={<CoordinationPage />} />

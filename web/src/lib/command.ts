@@ -162,9 +162,21 @@ export function featureGroups(tasks: DelegatedTask[]): FeatureGroup[] {
 export type ChannelEntry =
   | { type: 'command'; id: string; at: number; text: string; ok: boolean; mode: string }
   | { type: 'update'; id: string; at: number; update: CommanderUpdate }
+  | { type: 'reply'; id: string; at: number; text: string }
 
-/** Human commands and commander reports in one chronological conversation. */
-export function commanderFeed(commandCenter: CommandCenterSnapshot, limit = 60): ChannelEntry[] {
+/** Something the main session said in its own chat, not through report_status. */
+export interface CommanderReply {
+  id: string
+  at: number
+  text: string
+}
+
+/** Human commands, commander reports and its plain answers in one conversation. */
+export function commanderFeed(
+  commandCenter: CommandCenterSnapshot,
+  limit = 60,
+  replies: CommanderReply[] = [],
+): ChannelEntry[] {
   const entries: ChannelEntry[] = [
     ...commandCenter.commands.map((command) => ({
       type: 'command' as const,
@@ -180,8 +192,54 @@ export function commanderFeed(commandCenter: CommandCenterSnapshot, limit = 60):
       at: update.at,
       update,
     })),
+    ...replies.map((reply) => ({
+      type: 'reply' as const,
+      id: reply.id,
+      at: reply.at,
+      text: reply.text,
+    })),
   ].sort((a, b) => a.at - b.at)
   return entries.slice(-limit)
+}
+
+export type CommanderMessage =
+  | { type: 'update'; at: number; update: CommanderUpdate }
+  | { type: 'reply'; at: number; reply: CommanderReply }
+
+/**
+ * What the main session said last — a report it filed or an answer it typed.
+ * Answers matter: a commander that replies in chat without filing a report
+ * would otherwise look silent on the command page.
+ */
+export function latestCommanderMessage(
+  commandCenter: CommandCenterSnapshot,
+  replies: CommanderReply[] = [],
+): CommanderMessage | null {
+  const update = latestCommanderUpdate(commandCenter)
+  let reply: CommanderReply | null = null
+  for (const candidate of replies) {
+    if (!reply || candidate.at > reply.at) reply = candidate
+  }
+  if (!update) return reply ? { type: 'reply', at: reply.at, reply } : null
+  if (!reply) return { type: 'update', at: update.at, update }
+  return reply.at > update.at
+    ? { type: 'reply', at: reply.at, reply }
+    : { type: 'update', at: update.at, update }
+}
+
+/**
+ * The single report shown next to the composer. The snapshot already sorts
+ * reports newest first, but sorting here keeps the helper independent of the
+ * API's ordering.
+ */
+export function latestCommanderUpdate(
+  commandCenter: CommandCenterSnapshot,
+): CommanderUpdate | null {
+  let latest: CommanderUpdate | null = null
+  for (const update of commandCenter.updates) {
+    if (!latest || update.at > latest.at) latest = update
+  }
+  return latest
 }
 
 export function activeKnowledge(commandCenter: CommandCenterSnapshot, query: string) {

@@ -16,6 +16,11 @@ import type {
   DelegatedTaskPatch,
   DelegatedTaskPriority,
   DelegatedTaskStatus,
+  EpicInput,
+  EpicMessageInput,
+  EpicMessageKind,
+  EpicPatch,
+  EpicStatus,
   HookEnvelope,
   KnowledgeInput,
   KnowledgePatch,
@@ -673,6 +678,88 @@ export async function buildServer(
     )
   })
 
+  app.post('/api/epics', async (request, reply) => {
+    const body = asObject(request.body)
+    if (!body || typeof body.title !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { title } for the epic.')
+    }
+    if (
+      body.repositories !== undefined &&
+      (!Array.isArray(body.repositories) ||
+        body.repositories.some((item) => typeof item !== 'string'))
+    ) {
+      return sendError(reply, 400, 'bad_request', 'repositories must be a list of paths.')
+    }
+    return orchestrate(reply, async () =>
+      reply
+        .code(201)
+        .send(await orchestration.createEpic(body as unknown as EpicInput, sessionHeader(request))),
+    )
+  })
+
+  const epicStatuses = new Set<EpicStatus>(['active', 'paused', 'blocked', 'done', 'cancelled'])
+  const epicMessageKinds = new Set<EpicMessageKind>(['question', 'note', 'answer', 'status'])
+
+  app.patch('/api/epics/:id', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const body = asObject(request.body)
+    if (!body) return sendError(reply, 400, 'bad_request', 'Expected a JSON object.')
+    if (body.status !== undefined && !epicStatuses.has(body.status as EpicStatus)) {
+      return sendError(reply, 400, 'bad_request', 'Unknown epic status.')
+    }
+    if (
+      body.repositories !== undefined &&
+      (!Array.isArray(body.repositories) ||
+        body.repositories.some((item) => typeof item !== 'string'))
+    ) {
+      return sendError(reply, 400, 'bad_request', 'repositories must be a list of paths.')
+    }
+    return orchestrate(reply, async () =>
+      orchestration.updateEpic(id, body as unknown as EpicPatch, sessionHeader(request)),
+    )
+  })
+
+  app.post('/api/epics/:id/messages', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const body = asObject(request.body)
+    if (!body || typeof body.body !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { body } for the message.')
+    }
+    if (body.kind !== undefined && !epicMessageKinds.has(body.kind as EpicMessageKind)) {
+      return sendError(reply, 400, 'bad_request', 'Unknown epic message kind.')
+    }
+    return orchestrate(reply, async () =>
+      reply
+        .code(201)
+        .send(
+          await orchestration.postEpicMessage(
+            id,
+            body as unknown as EpicMessageInput,
+            sessionHeader(request),
+          ),
+        ),
+    )
+  })
+
+  app.post('/api/epics/:id/commander', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const body = asObject(request.body) ?? {}
+    if (body.name !== undefined && typeof body.name !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { name?: string }.')
+    }
+    return orchestrate(reply, async () =>
+      reply
+        .code(201)
+        .send(
+          await orchestration.spawnEpicCommander(
+            id,
+            { name: body.name as string | undefined },
+            sessionHeader(request),
+          ),
+        ),
+    )
+  })
+
   const taskStatuses = new Set<DelegatedTaskStatus>([
     'queued',
     'in_progress',
@@ -700,6 +787,33 @@ export async function buildServer(
         .send(
           await orchestration.createTask(
             body as unknown as DelegatedTaskInput,
+            sessionHeader(request),
+          ),
+        ),
+    )
+  })
+
+  app.post('/api/tasks/spawn', async (request, reply) => {
+    const body = asObject(request.body)
+    if (
+      !body ||
+      typeof body.title !== 'string' ||
+      typeof body.brief !== 'string' ||
+      typeof body.projectPath !== 'string'
+    ) {
+      return sendError(
+        reply,
+        400,
+        'bad_request',
+        'Expected { title, brief, projectPath } for the new worker session.',
+      )
+    }
+    return orchestrate(reply, async () =>
+      reply
+        .code(201)
+        .send(
+          await orchestration.spawnTask(
+            body as unknown as DelegatedTaskInput & { name?: string },
             sessionHeader(request),
           ),
         ),

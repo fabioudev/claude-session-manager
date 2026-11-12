@@ -605,6 +605,7 @@ async function getCommandCenter() {
       commanderSessionId: data.commanderSessionId,
       yourSessionId: identity.sessionId,
       tasks: (data.tasks || []).slice(0, 50),
+      epics: (data.epics || []).slice(0, 50),
       openDecisions,
       knowledge: (data.knowledge || []).filter((entry) => !entry.archivedAt).slice(0, 50),
       recentCommands: (data.commands || []).slice(0, 10),
@@ -630,6 +631,7 @@ async function createTask(args) {
       priority: args?.priority,
       assigneeSessionId,
       projectPath: args?.project_path,
+      epicId: args?.epic_id,
     },
   })
   const delivery = task.lastDispatch
@@ -679,6 +681,83 @@ async function dispatchTask(args) {
     sessionId: identity.sessionId,
   })
   return `Task ${task.id}: ${task.lastDispatch?.ok ? `delivery ${task.lastDispatch.mode}` : 'delivery failed'}. ${task.lastDispatch?.note || task.lastDispatch?.error || ''}`
+}
+
+async function spawnTask(args) {
+  const identity = requireIdentity()
+  const task = await api('/api/tasks/spawn', {
+    method: 'POST',
+    sessionId: identity.sessionId,
+    body: {
+      title: args?.title,
+      brief: args?.brief,
+      projectPath: args?.project_path,
+      priority: args?.priority,
+      name: args?.name,
+      epicId: args?.epic_id,
+    },
+  })
+  return `Task ${task.id} created (${task.status}) and started in a new session. ${task.assigneeSessionId ? `Session: ${task.assigneeSessionId}. ` : ''}${task.lastNote || ''}`
+}
+
+async function createEpic(args) {
+  const identity = requireIdentity()
+  let ownerSessionId = null
+  if (args?.owner_session_id) {
+    const data = await api('/api/sessions')
+    ownerSessionId = resolveSession(data.sessions || [], args.owner_session_id).id
+  }
+  const epic = await api('/api/epics', {
+    method: 'POST',
+    sessionId: identity.sessionId,
+    body: {
+      title: args?.title,
+      goal: args?.goal,
+      repositories: args?.repositories,
+      previewUrl: args?.preview_url,
+      ownerSessionId,
+    },
+  })
+  return `Epic ${epic.id} created (${epic.status})${epic.ownerSessionId ? `, owned by ${epic.ownerSessionId}` : ', no owner yet'}. Keep its status_line current with update_epic; the human reads that line on the overview.`
+}
+
+async function updateEpic(args) {
+  const identity = requireIdentity()
+  const epic = await api(`/api/epics/${encodeURIComponent(args?.epic_id || '')}`, {
+    method: 'PATCH',
+    sessionId: identity.sessionId,
+    body: {
+      title: args?.title,
+      goal: args?.goal,
+      status: args?.status,
+      statusLine: args?.status_line,
+      repositories: args?.repositories,
+      previewUrl: args?.preview_url,
+      ownerSessionId: args?.owner_session_id,
+      expectedRevision: args?.expected_revision,
+    },
+  })
+  return `Epic ${epic.id} is now ${epic.status} (revision ${epic.revision}). Status line: ${epic.statusLine || 'none yet'}.`
+}
+
+async function postEpicMessage(args) {
+  const identity = requireIdentity()
+  const epic = await api(`/api/epics/${encodeURIComponent(args?.epic_id || '')}/messages`, {
+    method: 'POST',
+    sessionId: identity.sessionId,
+    body: { body: args?.body, kind: args?.kind },
+  })
+  return `Message added to epic ${epic.id} (${epic.messages.length} in the thread). The human reads it there.`
+}
+
+async function spawnEpicCommander(args) {
+  const identity = requireIdentity()
+  const epic = await api(`/api/epics/${encodeURIComponent(args?.epic_id || '')}/commander`, {
+    method: 'POST',
+    sessionId: identity.sessionId,
+    body: { name: args?.name },
+  })
+  return `Epic ${epic.id} handed to a new epic commander${epic.ownerSessionId ? ` (${epic.ownerSessionId})` : ''}; status ${epic.status}. ${epic.ownerSessionId ? 'It registers within a few seconds and answers in the epic thread.' : 'The session could not be started.'}`
 }
 
 async function shareKnowledge(args) {
@@ -871,7 +950,7 @@ const TOOLS = [
   {
     name: 'create_task',
     description:
-      'Commander only: create and assign a durable task. Assignment immediately dispatches the brief to a live worker (or queues it in the worker inbox). Workers report completion into review, never straight to done.',
+      'Commander only: create and assign a durable task. Assignment immediately dispatches the brief to a live worker (or queues it in the worker inbox). Workers report completion into review, never straight to done. If no live idle worker can take it, use spawn_task instead of leaving it queued.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -880,6 +959,7 @@ const TOOLS = [
         assignee_session_id: { type: 'string', description: 'Worker full id, short id, or name from list_sessions. Omit to leave unassigned.' },
         priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
         project_path: { type: 'string', description: 'Optional absolute project directory used for knowledge scoping.' },
+        epic_id: { type: 'string', description: 'The epic this task belongs to. Epic commanders must set it; the main commander should set it on every task.' },
       },
       required: ['title', 'brief'],
       additionalProperties: false,
@@ -914,9 +994,84 @@ const TOOLS = [
         body: { type: 'string', description: 'Short report: what is running, where, current state and what you will report next. Markdown allowed.' },
         kind: { type: 'string', enum: ['status', 'progress', 'blocked', 'done', 'question', 'note'] },
         project_path: { type: 'string', description: 'Optional absolute project directory this report is about.' },
+        epic_id: { type: 'string', description: 'The epic this report is about, when it belongs to one.' },
         task_ids: { type: 'array', items: { type: 'string' }, description: 'Related task ids so the report links to them.' },
       },
       required: ['title', 'body'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'create_epic',
+    description:
+      'Commander only: open an epic for a large goal the human handed over, or create one so related tasks have a stable home. The epic groups tasks across repositories, carries a short status_line the human reads, and has its own thread. Attach tasks with epic_id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short name of the larger goal, e.g. "Admin-APK Key-Rotation".' },
+        goal: { type: 'string', description: 'What is to be achieved and what counts as done.' },
+        repositories: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Absolute project directories this epic touches.',
+        },
+        preview_url: { type: 'string', description: 'Optional preview URL if one already exists.' },
+        owner_session_id: {
+          type: 'string',
+          description: 'Optional session to own it now; usually omitted, then spawn_epic_commander.',
+        },
+      },
+      required: ['title'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'update_epic',
+    description:
+      'Commander or epic owner: keep the epic current. status_line is one or two short sentences — where it stands and what runs next; it is the human\'s overview. Set status done only when everything is verified.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        epic_id: { type: 'string' },
+        title: { type: 'string' },
+        goal: { type: 'string' },
+        status: { type: 'string', enum: ['active', 'paused', 'blocked', 'done', 'cancelled'] },
+        status_line: { type: 'string', description: 'One or two short sentences. Max 400 characters.' },
+        repositories: { type: 'array', items: { type: 'string' } },
+        preview_url: { type: 'string' },
+        owner_session_id: { type: 'string', description: 'Hand the epic to another session, or empty to clear.' },
+        expected_revision: { type: 'number' },
+      },
+      required: ['epic_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'post_epic_message',
+    description:
+      'Write in an epic\'s own thread. The epic owner answers human questions there; the main chat stays free. Markdown allowed. Never write credentials into it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        epic_id: { type: 'string' },
+        body: { type: 'string' },
+        kind: { type: 'string', enum: ['question', 'note', 'answer', 'status'] },
+      },
+      required: ['epic_id', 'body'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spawn_epic_commander',
+    description:
+      'Commander only: start a dedicated session that owns and runs one epic — plans it, dispatches workers, reviews and answers the human in the epic thread. Use this when a new large goal arrives so your own context stays on dispatch and milestones.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        epic_id: { type: 'string' },
+        name: { type: 'string', description: 'Optional session name, e.g. "epic-admin-apk".' },
+      },
+      required: ['epic_id'],
       additionalProperties: false,
     },
   },
@@ -927,6 +1082,24 @@ const TOOLS = [
       type: 'object',
       properties: { task_id: { type: 'string' } },
       required: ['task_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'spawn_task',
+    description:
+      'Commander only: create a task and start a brand-new worker session for it in the given project, all in one call. Use this whenever no live idle worker can take the work — this machine runs as many sessions as needed, so never leave a task queued. The new session is a normal peer: monitor it via get_command_center and verify its result.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short outcome-oriented task title.' },
+        brief: { type: 'string', description: 'Complete context, acceptance criteria and constraints for the worker.' },
+        project_path: { type: 'string', description: 'Absolute project directory the new session starts in.' },
+        priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
+        name: { type: 'string', description: 'Optional session name shown on the board, e.g. "eBay-sourcing".' },
+        epic_id: { type: 'string', description: 'The epic this task belongs to. Epic commanders must set it.' },
+      },
+      required: ['title', 'brief', 'project_path'],
       additionalProperties: false,
     },
   },
@@ -991,6 +1164,11 @@ const HANDLERS = {
   update_task: updateTask,
   report_status: reportStatus,
   dispatch_task: dispatchTask,
+  spawn_task: spawnTask,
+  create_epic: createEpic,
+  update_epic: updateEpic,
+  post_epic_message: postEpicMessage,
+  spawn_epic_commander: spawnEpicCommander,
   share_knowledge: shareKnowledge,
   list_knowledge: listKnowledge,
   request_decision: requestDecision,
@@ -1000,7 +1178,9 @@ const INSTRUCTIONS = `You are one of several Claude Code sessions on this machin
 
 Use list_sessions to see your peers. Before editing files, call shared_changes and check whether another session touched or claimed the same files; review their work (git status / git diff) instead of overwriting it. Claim files with claim_files before multi-file or risky edits, and release them when done. Use send_message to leave short, actionable notes for a peer or for everyone; messages arrive on the recipient's next prompt. read_inbox shows messages addressed to you. If you start a dev server for a preview, call register_preview with its port so the board links it.
 
-The command center has durable tasks, knowledge and human decisions. The commander uses create_task to delegate; assigned workers report explicit progress with update_task, finish in review, and call request_decision when blocked on the human. As commander, call report_status immediately after delegating (which agents run what, in which project) and again on milestones, blockers and completions — the human reads that channel instead of polling. Use get_command_center and list_knowledge for the current shared state.
+The command center has durable tasks, knowledge and human decisions. The commander uses create_task to delegate; assigned workers report explicit progress with update_task, finish in review, and call request_decision when blocked on the human. There is no session budget: when no live idle worker can take a task, the commander calls spawn_task to start a new session for it instead of leaving work queued. As commander, call report_status immediately after delegating (which agents run what, in which project) and again on milestones, blockers and completions — the human reads that channel instead of polling. Use get_command_center and list_knowledge for the current shared state.
+
+Large goals are epics. When the human hands over a bigger task, attach it to a fitting epic or open one with create_epic, and hand it to a dedicated session with spawn_epic_commander; every task then carries the epic_id. The epic status_line (update_epic) is what the human reads on the overview — one or two short sentences, kept current. Human questions and remarks about an epic arrive in the epic thread; answer there with post_epic_message instead of the main chat.
 
 The human can answer your AskUserQuestion prompts from the web UI. When that happens, the tool call is denied with the answers in its reason; continue the task using those answers instead of asking again.`
 

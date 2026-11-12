@@ -8,8 +8,8 @@
   "plugins": [
     {
       "name": "csm",
-      "description": "Report session status to the local board, answer AskUserQuestion prompts in the browser, and coordinate with other Claude Code sessions through messages and file claims.",
-      "version": "0.1.2",
+      "description": "Report session status to the local board, answer AskUserQuestion prompts in the browser, coordinate with other Claude Code sessions, and run large goals as epics with their own commander and thread.",
+      "version": "0.1.3",
       "source": "./plugin",
       "author": {
         "name": "Fabio Mende",

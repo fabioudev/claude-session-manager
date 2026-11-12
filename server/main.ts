@@ -188,6 +188,7 @@ async function serve(config: AppConfig): Promise<void> {
     getSession: (id) => manager.getSession(id),
     sendPrompt: (id, text) => manager.sendPrompt(id, text),
     launchCommander: (input) => manager.launchCommanderSession(input),
+    launchSession: (input) => manager.launchSession(input),
     listSessions: () => manager.getSessions(),
     // The commander coordinates sessions across every project, so the home
     // directory (with the top-level project map) is a better default than the
@@ -200,6 +201,7 @@ async function serve(config: AppConfig): Promise<void> {
     orchestration: {
       contextFor: (sessionId, reason) => orchestration.contextFor(sessionId, reason),
       commanderSessionId: () => orchestration.snapshot().commanderSessionId,
+      sessionEnded: (sessionId) => void orchestration.sessionEnded(sessionId),
     },
   })
   await manager.init()
