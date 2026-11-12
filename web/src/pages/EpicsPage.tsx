@@ -9,7 +9,14 @@ import {
 } from 'lucide-react'
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import { type EpicRollup, epicRollups, epicsNeedingHuman, standaloneTasks } from '../lib/epics'
+import {
+  type EpicRollup,
+  epicRollups,
+  epicStatusLabel,
+  epicsNeedingHuman,
+  epicTone,
+  standaloneTasks,
+} from '../lib/epics'
 import { relativeTime, sessionLabel } from '../lib/format'
 import { useLive } from '../lib/live'
 
@@ -24,8 +31,6 @@ function needsReason(rollup: EpicRollup): string {
       `${rollup.unanswered} ${rollup.unanswered === 1 ? 'Frage' : 'Fragen'} im Epic-Thread`,
     )
   }
-  if (rollup.counts.review > 0) parts.push(`${rollup.counts.review} Ergebnis(se) zur Abnahme`)
-  if (rollup.counts.blocked > 0) parts.push(`${rollup.counts.blocked} blockierte Aufgabe(n)`)
   if (rollup.epic.status === 'blocked') parts.push('Epic ist blockiert')
   return parts.join(' · ')
 }
@@ -36,8 +41,8 @@ function EpicCard({ rollup }: { rollup: EpicRollup }) {
   return (
     <Link className="epic-card" to={`/epics/${encodeURIComponent(epic.id)}`}>
       <div className="epic-card-head">
-        <span className={`epic-status ${rollup.needsHuman ? 'needs' : epic.status}`}>
-          {rollup.needsHuman ? 'Braucht dich' : epic.status === 'active' ? 'Läuft' : epic.status}
+        <span className={`epic-status ${rollup.needsHuman ? 'needs' : epicTone(rollup)}`}>
+          {rollup.needsHuman ? 'Braucht dich' : epicStatusLabel(rollup)}
         </span>
         <span className="epic-card-age">
           <Clock3 size={13} aria-hidden="true" />

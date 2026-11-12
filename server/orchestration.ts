@@ -1758,7 +1758,11 @@ export class OrchestrationService {
     const result = await this.options
       .sendPrompt(owner, this.epicMessagePrompt(epic, message))
       .catch(() => ({ ok: false as const, mode: 'queued' as const, error: 'Delivery failed.' }))
-    if (result.ok) message.deliveredAt = this.now()
+    // Only a typed prompt proves the owner actually read it. A queued prompt
+    // waits in the owner's inbox for its next turn, so the message must stay
+    // pending: the UI then says "not read yet", and contextFor injects it with
+    // that turn (marking it read) instead of losing it.
+    if (result.ok && result.mode === 'typed') message.deliveredAt = this.now()
   }
 
   private epicMessagePrompt(epic: Epic, message: EpicMessage): string {

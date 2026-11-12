@@ -11,7 +11,7 @@ import type {
   PromptResult,
   SessionSummary,
 } from '../shared/types.js'
-import { epicRollup, epicRollups, standaloneTasks } from '../web/src/lib/epics.js'
+import { epicRollup, epicRollups, epicStatusLabel, standaloneTasks } from '../web/src/lib/epics.js'
 import { makeSession } from './support/session.js'
 
 const dirs: string[] = []
@@ -182,6 +182,30 @@ describe('epics', () => {
     ).rejects.toMatchObject({ code: 'forbidden' })
   })
 
+  it('keeps a question pending when the owner could only queue it, then injects it on its next turn', async () => {
+    const { service } = await harness({
+      sendPrompt: async () => ({
+        ok: true,
+        mode: 'queued',
+        note: 'The session is working; the prompt waits for its next turn.',
+      }),
+    })
+    const epic = await service.createEpic(
+      { title: 'Busy', ownerSessionId: 'epic-owner' },
+      'commander',
+    )
+    const updated = await service.postEpicMessage(epic.id, { body: 'Status?' }, null)
+    const message = updated.messages.at(-1)
+    expect(message).toMatchObject({ kind: 'question', authorSessionId: null })
+    expect(message?.deliveredAt).toBeNull()
+
+    // The owner's next prompt carries the still-pending message and marks it read.
+    const context = service.contextFor('epic-owner', 'prompt')
+    expect(context).toContain('Status?')
+    const reread = (await service.snapshot()).epics.find((item) => item.id === epic.id)
+    expect(reread?.messages.at(-1)?.deliveredAt).not.toBeNull()
+  })
+
   it('leaves a question pending when the epic has no commander and nudges the commander', async () => {
     const { service, deliveries } = await harness()
     const epic = await service.createEpic({ title: 'Unowned' }, null)
@@ -329,6 +353,20 @@ describe('epic rollups', () => {
     expect(rollup.unanswered).toBe(1)
     expect(rollup.needsHuman).toBe(true)
     expect(rollup.lastActivityAt).toBe(6)
+  })
+
+  it('does not flag an epic as needing the human for review or blocked tasks', () => {
+    const epic = sampleEpic({ status: 'active' })
+    const tasks = [
+      sampleTask({ id: 'r', epicId: epic.id, status: 'review', progress: 100 }),
+      sampleTask({ id: 'b', epicId: epic.id, status: 'blocked', progress: 40 }),
+    ]
+    const rollup = epicRollup(epic, tasks, [])
+    expect(rollup.needsHuman).toBe(false)
+    expect(epicStatusLabel(rollup)).toBe('Blockiert')
+
+    const blockedEpic = epicRollup(sampleEpic({ status: 'blocked' }), [], [])
+    expect(blockedEpic.needsHuman).toBe(true)
   })
 
   it('sorts closed epics last and reports standalone open tasks', () => {

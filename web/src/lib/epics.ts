@@ -19,7 +19,7 @@ export interface EpicRollup {
   owner: SessionSummary | null
   /** Human messages the epic's commander has not answered yet. */
   unanswered: number
-  /** True when something in this epic waits for the human. */
+  /** True when something in this epic waits for the human, not for a session. */
   needsHuman: boolean
 }
 
@@ -74,8 +74,9 @@ export function epicRollup(
     lastActivityAt,
     owner: sessions.find((session) => session.id === epic.ownerSessionId) ?? null,
     unanswered,
-    needsHuman:
-      unanswered > 0 || counts.review > 0 || counts.blocked > 0 || epic.status === 'blocked',
+    // Review and blocked tasks are the epic commander's business; only an
+    // unanswered question or a blocked epic actually needs the human.
+    needsHuman: unanswered > 0 || epic.status === 'blocked',
   }
 }
 
@@ -109,22 +110,22 @@ export function epicsNeedingHuman(rollups: EpicRollup[]): EpicRollup[] {
 
 export function epicStatusLabel(rollup: EpicRollup): string {
   const { epic, counts } = rollup
-  if (epic.status === 'done') return 'Done'
-  if (epic.status === 'cancelled') return 'Cancelled'
-  if (epic.status === 'paused') return 'Paused'
-  if (epic.status === 'blocked' || counts.blocked > 0) return 'Blocked'
-  if (rollup.unanswered > 0) return 'Waiting for you'
-  if (counts.review > 0) return 'In review'
-  if (counts.in_progress > 0) return 'Running'
-  if (counts.queued > 0) return 'Queued'
-  return 'Active'
+  if (epic.status === 'done') return 'Fertig'
+  if (epic.status === 'cancelled') return 'Eingestellt'
+  if (epic.status === 'paused') return 'Pausiert'
+  if (epic.status === 'blocked' || counts.blocked > 0) return 'Blockiert'
+  if (rollup.unanswered > 0) return 'Wartet auf dich'
+  if (counts.review > 0) return 'Zur Abnahme'
+  if (counts.in_progress > 0) return 'Läuft'
+  if (counts.queued > 0) return 'Wartet'
+  return 'Aktiv'
 }
 
 export function epicTone(rollup: EpicRollup): string {
   const label = epicStatusLabel(rollup)
-  if (label === 'Done') return 'done'
-  if (label === 'Cancelled' || label === 'Paused') return 'muted'
-  if (label === 'Blocked') return 'blocked'
-  if (label === 'Waiting for you' || label === 'In review') return 'needs'
+  if (label === 'Fertig') return 'done'
+  if (label === 'Eingestellt' || label === 'Pausiert') return 'muted'
+  if (label === 'Blockiert') return 'blocked'
+  if (label === 'Wartet auf dich' || label === 'Zur Abnahme') return 'needs'
   return 'active'
 }
