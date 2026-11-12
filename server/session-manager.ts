@@ -193,6 +193,8 @@ export interface SessionManagerOptions {
      * queues to it gets a chance to deliver now.
      */
     sessionIdle?: (sessionId: string) => void
+    /** Periodic retry for epic thread messages that were never delivered. */
+    sweepEpicMessages?: () => Promise<void>
   }
 }
 
@@ -877,7 +879,11 @@ export class SessionManager {
    * the text typed into its own pane, so it starts working right away; anything
    * else goes to the inbox, which the session reads on its next turn.
    */
-  async sendPrompt(id: string, text: string): Promise<PromptResult> {
+  async sendPrompt(
+    id: string,
+    text: string,
+    options: { queue?: boolean } = {},
+  ): Promise<PromptResult> {
     const body = text.trim()
     if (!body) return { ok: false, mode: 'queued', error: 'The task is empty.' }
     if (body.length > MAX_PROMPT_LENGTH) {
@@ -891,7 +897,10 @@ export class SessionManager {
     if (!session) return { ok: false, mode: 'queued', error: 'Unknown session.' }
 
     const queue = (note: string | null): PromptResult => {
-      this.sendMessage({ body, toSessionId: id })
+      // A caller that can retry later (epic thread delivery does, through
+      // `contextFor`) switches the inbox copy off: the same text would otherwise
+      // arrive twice — once typed, once injected into the next prompt.
+      if (options.queue !== false) this.sendMessage({ body, toSessionId: id })
       return { ok: true, mode: 'queued', note }
     }
     const decision = dispatchDecision({
@@ -957,6 +966,9 @@ export class SessionManager {
       // whose state file already says "blocked".
       backgroundState: blocked ? 'blocked' : (job?.state ?? null),
       backgroundExited: job?.exited ?? false,
+      // state.json says "working" for the whole life of the job; only `tempo`
+      // says whether a turn is actually running.
+      backgroundIdle: Boolean(job?.idle),
       hasQuestion: Boolean(session.question),
       // An expired question has no terminal window left: on a background session
       // that window never existed, so the guard must not hold the prompt back.
@@ -2076,13 +2088,16 @@ export class SessionManager {
       // A background job that stopped working cannot pick up its inbox by
       // itself. A blocked job is left alone: someone is expected at its dialog.
       const previous = this.summaries.get(id)
+      const turnedIdle =
+        Boolean(previous && previous.status === 'working') && summary.status !== 'working'
       if (
-        previous?.live &&
-        !summary.live &&
-        summary.kind === 'background' &&
-        summary.backgroundState !== 'blocked'
+        turnedIdle ||
+        (previous?.live &&
+          !summary.live &&
+          summary.kind === 'background' &&
+          summary.backgroundState !== 'blocked')
       ) {
-        wentIdle.push(id)
+        if (!wentIdle.includes(id)) wentIdle.push(id)
       }
     }
 
@@ -2098,6 +2113,9 @@ export class SessionManager {
     for (const summary of ordered) this.summaries.set(summary.id, summary)
 
     for (const id of wentIdle) this.orchestration?.sessionIdle?.(id)
+    // Retries whatever no transition could deliver (a session that was busy when
+    // the human wrote and never produced another turn end).
+    void this.orchestration?.sweepEpicMessages?.()
 
     for (const summary of ordered) {
       const previous = this.previousSerialized.get(summary.id)
@@ -2200,7 +2218,7 @@ export class SessionManager {
       ? { ...questionBase, answerable: questionBase.answerable && !this.config.readOnly }
       : null
 
-    const jobWorking = job?.state === 'working' && !job?.exited && !job?.blocked
+    const jobWorking = job?.state === 'working' && !job?.exited && !job?.blocked && !job.idle
     const jobBlocked = !job?.exited && (job?.state === 'blocked' || Boolean(job?.blocked))
     const jobFinished =
       job?.exited || job?.state === 'done' || job?.state === 'failed' || job?.state === 'stopped'

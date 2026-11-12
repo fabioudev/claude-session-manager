@@ -38,6 +38,8 @@ import {
   truncate,
 } from './util.js'
 
+const MINUTE = 60 * 1000
+
 const MAX_TASKS = 500
 const MAX_EPICS = 100
 const MAX_EPIC_MESSAGES = 120
@@ -69,7 +71,7 @@ interface OrchestrationOptions {
   dataDir: string
   readOnly: () => boolean
   getSession: (id: string) => SessionSummary | null
-  sendPrompt: (id: string, text: string) => Promise<PromptResult>
+  sendPrompt: (id: string, text: string, options?: { queue?: boolean }) => Promise<PromptResult>
   onChange: (snapshot: CommandCenterSnapshot) => void
   /** Launches a dedicated commander when none is selected or it went offline. */
   launchCommander?: (input: LaunchSessionInput) => Promise<LaunchSessionResult>
@@ -217,6 +219,8 @@ export class OrchestrationService {
   private state: PersistedCommandCenter = emptyState()
   private saveChain: Promise<void> = Promise.resolve()
   private readonly now: () => number
+  /** Last pass that retried undelivered epic thread messages. */
+  private lastEpicSweepAt = 0
 
   constructor(private readonly options: OrchestrationOptions) {
     this.file = path.join(options.dataDir, 'command-center.json')
@@ -1233,6 +1237,14 @@ export class OrchestrationService {
    */
   async sessionIdle(sessionId: string): Promise<void> {
     if (this.options.readOnly()) return
+    const session = this.options.getSession(sessionId)
+    // A session at a question cannot take a new turn: the prompt would only be
+    // queued into an inbox the next prompt injects from — the same text twice.
+    if (!session || session.status === 'working' || session.question) return
+    // A job at a dialog is not idle, whatever the state file says; waking it
+    // would throw that dialog away.
+    if (session.kind === 'background' && (session.backgroundState === 'blocked' || session.needs))
+      return
     const epics = this.state.epics.filter(
       (epic) =>
         epic.ownerSessionId === sessionId && epic.status !== 'done' && epic.status !== 'cancelled',
@@ -1244,18 +1256,49 @@ export class OrchestrationService {
       )
       for (const message of pending.slice(0, 3)) {
         const result = await this.options
-          .sendPrompt(sessionId, this.epicMessagePrompt(epic, message))
+          .sendPrompt(sessionId, this.epicMessagePrompt(epic, message), { queue: false })
           .catch(() => null)
         // Only a typed prompt means the message actually reached the session;
         // otherwise it stays pending for the next attempt.
-        if (!result?.ok || result.mode !== 'typed') return
+        if (!result?.ok || result.mode !== 'typed') {
+          if (delivered) await this.commit()
+          return
+        }
         message.deliveredAt = this.now()
         delivered += 1
+        // Handing a prompt to a background session restarts its job. A second
+        // prompt in the same pass would stop that fresh job again, so a
+        // background owner gets one message per pass; the rest follow on the
+        // next sweep.
+        if (session.kind === 'background') {
+          await this.commit()
+          return
+        }
       }
     }
     if (delivered) await this.commit()
   }
 
+  /**
+   * Delivers thread messages that were posted while their epic commander could
+   * not take them — and that no later event retried, because a session that is
+   * merely alive produces no further transition. Runs at most once a minute.
+   */
+  async sweepEpicMessages(): Promise<void> {
+    if (this.options.readOnly()) return
+    const at = this.now()
+    if (at - this.lastEpicSweepAt < MINUTE) return
+    this.lastEpicSweepAt = at
+    const owners = new Set<string>()
+    for (const epic of this.state.epics) {
+      if (epic.status === 'done' || epic.status === 'cancelled') continue
+      if (!epic.ownerSessionId) continue
+      if (epic.messages.some((message) => !message.authorSessionId && !message.deliveredAt)) {
+        owners.add(epic.ownerSessionId)
+      }
+    }
+    for (const owner of owners) await this.sessionIdle(owner)
+  }
   async dispatchTask(id: string, actorSessionId: string | null): Promise<DelegatedTask> {
     this.writable()
     const task = this.task(id)
@@ -1859,7 +1902,7 @@ export class OrchestrationService {
       return
     }
     const result = await this.options
-      .sendPrompt(owner, this.epicMessagePrompt(epic, message))
+      .sendPrompt(owner, this.epicMessagePrompt(epic, message), { queue: false })
       .catch(() => ({ ok: false as const, mode: 'queued' as const, error: 'Delivery failed.' }))
     // Only a typed prompt proves the owner actually read it. A queued prompt
     // waits in the owner's inbox for its next turn, so the message must stay

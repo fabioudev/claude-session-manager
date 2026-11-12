@@ -98,6 +98,14 @@ describe('wakeDecision', () => {
     expect(decision.reason).toContain('working')
   })
 
+  it('wakes a job that finished its turn although its state still says working', () => {
+    // `tempo: "idle"` is the only sign that no turn is running; without this the
+    // prompt would wait forever, because a background job starts no next turn.
+    expect(
+      wakeDecision({ ...background, backgroundState: 'working', backgroundIdle: true }),
+    ).toEqual({ wake: true, stop: true })
+  })
+
   it('wakes a job whose state still says working but whose process is gone', () => {
     expect(
       wakeDecision({ ...background, backgroundState: 'working', backgroundExited: true }),

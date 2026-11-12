@@ -49,6 +49,12 @@ export interface WakeInput {
   backgroundState: string | null
   /** The job's process is gone; its state file may still say "working". */
   backgroundExited?: boolean
+  /**
+   * The job is alive but between turns (`tempo: "idle"`). Its state file says
+   * "working" anyway, so without this the prompt waits for a turn end that a
+   * background session never turns into another turn by itself.
+   */
+  backgroundIdle?: boolean
   /** The session is at a question only the person can answer. */
   hasQuestion: boolean
   /**
@@ -97,6 +103,11 @@ export function wakeDecision(input: WakeInput): WakeDecision {
     input.backgroundState === 'failed'
   ) {
     return { wake: true, stop: false }
+  }
+  // Between turns the conversation is not owned by a running turn, so stopping
+  // the idle job and resuming it with the text continues the same session.
+  if (input.backgroundState === 'working' && input.backgroundIdle) {
+    return { wake: true, stop: true }
   }
   // "working" and "unknown" both mean the job may still own the conversation;
   // queue instead of risking a parallel copy.

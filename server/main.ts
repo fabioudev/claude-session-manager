@@ -186,7 +186,7 @@ async function serve(config: AppConfig): Promise<void> {
     dataDir: config.dataDir,
     readOnly: () => config.readOnly,
     getSession: (id) => manager.getSession(id),
-    sendPrompt: (id, text) => manager.sendPrompt(id, text),
+    sendPrompt: (id, text, options) => manager.sendPrompt(id, text, options),
     launchCommander: (input) => manager.launchCommanderSession(input),
     launchSession: (input) => manager.launchSession(input),
     listSessions: () => manager.getSessions(),
@@ -204,6 +204,7 @@ async function serve(config: AppConfig): Promise<void> {
       sessionEnded: (sessionId) => void orchestration.sessionEnded(sessionId),
       sessionReplaced: (from, to) => void orchestration.reassignSession(from, to),
       sessionIdle: (sessionId) => void orchestration.sessionIdle(sessionId),
+      sweepEpicMessages: () => orchestration.sweepEpicMessages(),
     },
   })
   await manager.init()

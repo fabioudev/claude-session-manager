@@ -115,6 +115,50 @@ describe('background job registry', () => {
     expect(job?.blocked).toBe(true)
   })
 
+  it('reports a job between turns as idle although its state says working', async () => {
+    const { registry, jobsDir } = await harness()
+    const recent = new Date().toISOString()
+    await jobFolder(
+      jobsDir,
+      'resting-job',
+      { state: 'working', tempo: 'idle', sessionId: 'sess-resting', updatedAt: recent },
+      false,
+    )
+    await jobFolder(
+      jobsDir,
+      'busy-job',
+      { state: 'working', tempo: 'active', sessionId: 'sess-busy', updatedAt: recent },
+      false,
+    )
+
+    await registry.refresh()
+    const jobs = registry.getSnapshot().jobs
+    // Only `tempo` distinguishes a running turn from a job that finished one.
+    expect(jobs.find((job) => job.jobId === 'resting-job')?.idle).toBe(true)
+    expect(jobs.find((job) => job.jobId === 'busy-job')?.idle).toBe(false)
+  })
+
+  it('reads the kind "bg" from Claude Code as a background session', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'csm-registry-'))
+    dirs.push(root)
+    const sessionsDir = path.join(root, 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    await writeFile(
+      path.join(sessionsDir, `${process.pid}.json`),
+      JSON.stringify({
+        pid: process.pid,
+        sessionId: 'sess-bg',
+        kind: 'bg',
+        status: 'idle',
+        updatedAt: Date.now(),
+      }),
+    )
+    const registry = new ClaudeRegistry({ sessionsDir, jobsDir: path.join(root, 'jobs') })
+
+    await registry.refresh()
+    expect(registry.getSnapshot().sessions[0]?.kind).toBe('background')
+  })
+
   it('lists only the roster workers whose process is alive', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'csm-roster-'))
     dirs.push(root)

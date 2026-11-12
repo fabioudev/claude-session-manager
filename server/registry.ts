@@ -52,6 +52,12 @@ export interface BackgroundJob {
    * questions under `block`), even while `state` still says "working".
    */
   blocked: boolean
+  /**
+   * The job is alive but between turns (`tempo: "idle"`). `state` keeps saying
+   * "working" until the job is stopped, so this is the only sign that a turn
+   * ended and the conversation can be resumed with a new prompt.
+   */
+  idle: boolean
 }
 
 /** A job started seconds ago has not spawned its host process yet. */
@@ -121,7 +127,13 @@ function parseLiveSession(raw: unknown): LiveSession | null {
   const sessionId = asString(value.sessionId)
   const pid = asNumber(value.pid)
   if (!sessionId || !pid) return null
-  const kind = value.kind === 'interactive' || value.kind === 'background' ? value.kind : 'unknown'
+  // Claude Code writes "bg" for background sessions in its own registry.
+  const kind =
+    value.kind === 'interactive' || value.kind === 'background'
+      ? value.kind
+      : value.kind === 'bg'
+        ? 'background'
+        : 'unknown'
   const status =
     value.status === 'busy' || value.status === 'idle' || value.status === 'waiting'
       ? value.status
@@ -182,6 +194,9 @@ function parseJob(jobId: string, raw: unknown, exited: boolean): BackgroundJob |
   const block = value.block as { questions?: unknown } | undefined
   const blocked =
     value.tempo === 'blocked' || (Array.isArray(block?.questions) && block.questions.length > 0)
+  // `tempo` is what Claude Code updates when a turn starts and ends; `state`
+  // stays "working" for the whole life of the job.
+  const idle = value.tempo === 'idle' && state === 'working'
   return {
     jobId,
     sessionId: asString(value.sessionId) ?? asString(value.resumeSessionId),
@@ -200,6 +215,7 @@ function parseJob(jobId: string, raw: unknown, exited: boolean): BackgroundJob |
     fan,
     exited,
     blocked,
+    idle,
   }
 }
 

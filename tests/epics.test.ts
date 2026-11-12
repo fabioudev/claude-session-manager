@@ -235,6 +235,57 @@ describe('epics', () => {
     expect(reread?.messages.at(-1)?.deliveredAt).not.toBeNull()
   })
 
+  it('waits while the owner is still working and keeps the thread message pending', async () => {
+    const { service, sessions, deliveries } = await harness({
+      sendPrompt: async () => ({
+        ok: true,
+        mode: 'queued',
+        note: 'The session is working; the prompt waits for its next turn.',
+      }),
+    })
+    const epic = await service.createEpic(
+      { title: 'Busy', ownerSessionId: 'epic-owner' },
+      'commander',
+    )
+    const posted = await service.postEpicMessage(epic.id, { body: 'Status?' }, null)
+    expect(posted.messages.at(-1)?.deliveredAt).toBeNull()
+    deliveries.length = 0
+    const owner = sessions.get('epic-owner')
+    if (!owner) throw new Error('epic-owner fixture missing')
+    sessions.set('epic-owner', { ...owner, status: 'working' })
+
+    await service.sessionIdle('epic-owner')
+
+    // A turn in flight cannot take the prompt; it waits for the turn to end
+    // instead of being typed into the middle of it.
+    expect(deliveries).toHaveLength(0)
+    const reread = service.snapshot().epics.find((item) => item.id === epic.id)
+    expect(reread?.messages.at(-1)?.deliveredAt).toBeNull()
+  })
+
+  it('does not wake an owner that waits at a dialog, because that would drop it', async () => {
+    const { service, sessions, deliveries } = await harness()
+    const epic = await service.createEpic(
+      { title: 'Blocked', ownerSessionId: 'epic-owner' },
+      'commander',
+    )
+    await service.postEpicMessage(epic.id, { body: 'Status?' }, null)
+    deliveries.length = 0
+    const owner = sessions.get('epic-owner')
+    if (!owner) throw new Error('epic-owner fixture missing')
+    sessions.set('epic-owner', {
+      ...owner,
+      kind: 'background',
+      status: 'waiting',
+      backgroundState: 'blocked',
+      needs: 'approve Entering worktree',
+    })
+
+    await service.sessionIdle('epic-owner')
+
+    expect(deliveries).toHaveLength(0)
+  })
+
   it('leaves a question pending when the epic has no commander and nudges the commander', async () => {
     const { service, deliveries } = await harness()
     const epic = await service.createEpic({ title: 'Unowned' }, null)
