@@ -464,12 +464,46 @@
 }
 
 .epic-goal {
+  position: relative;
   max-width: 68ch;
-  margin-top: 10px;
+  margin-top: 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--line-strong);
   color: var(--ink-2);
   font-size: 13px;
   line-height: 1.6;
-  white-space: pre-wrap;
+}
+
+.epic-goal.is-clamped {
+  max-height: 9.6em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 58%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 58%, transparent 100%);
+}
+
+.epic-goal-kicker {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.epic-goal-toggle {
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.epic-goal-toggle:hover {
+  text-decoration: underline;
 }
 
 .epic-header-links {

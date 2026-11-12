@@ -83,6 +83,7 @@ export function EpicPage() {
   const [text, setText] = useState('')
   const [pending, setPending] = useState(false)
   const [starting, setStarting] = useState(false)
+  const [goalOpen, setGoalOpen] = useState(false)
   const threadBody = useRef<HTMLDivElement>(null)
   const readOnly = Boolean(config?.readOnly)
 
@@ -93,6 +94,9 @@ export function EpicPage() {
   )
   const messages = epic?.messages ?? []
   const messageKey = messages[messages.length - 1]?.id ?? null
+  // Commanders often write a structured brief into the goal; keep the header
+  // compact and let the human unfold it.
+  const goalLong = (epic?.goal?.length ?? 0) > 420
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on new message only
   useEffect(() => {
@@ -171,7 +175,24 @@ export function EpicPage() {
           </div>
           <h1>{epic.title}</h1>
           <p className="epic-status-line">{epic.statusLine || 'Noch keine Statuszeile.'}</p>
-          {epic.goal ? <p className="epic-goal">{epic.goal}</p> : null}
+          {epic.goal ? (
+            <>
+              <div className={`epic-goal${goalLong && !goalOpen ? ' is-clamped' : ''}`}>
+                <span className="epic-goal-kicker">Auftrag</span>
+                <Markdown text={epic.goal} />
+              </div>
+              {goalLong ? (
+                <button
+                  type="button"
+                  className="epic-goal-toggle"
+                  onClick={() => setGoalOpen((open) => !open)}
+                  aria-expanded={goalOpen}
+                >
+                  {goalOpen ? 'Weniger anzeigen' : 'Ganzen Auftrag anzeigen'}
+                </button>
+              ) : null}
+            </>
+          ) : null}
           <div className="epic-header-links">
             {repoPaths.length ? (
               repoPaths.map((repo) => (
