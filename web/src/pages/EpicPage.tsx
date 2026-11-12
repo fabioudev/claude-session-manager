@@ -283,8 +283,10 @@ export function EpicPage() {
               <h2 id="epic-thread-title">Thread</h2>
               <p>Fragen und Anmerkungen hier bleiben beim Epic — und werden dort beantwortet.</p>
             </div>
-            {rollup.unanswered > 0 ? (
-              <span className="attention-count">{rollup.unanswered}</span>
+            {rollup.undelivered > 0 ? (
+              <span className="attention-count" title="Noch nicht zugestellte Nachrichten">
+                {rollup.undelivered}
+              </span>
             ) : null}
           </div>
           {ownerQuestion ? (

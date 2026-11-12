@@ -3,6 +3,7 @@ import type {
   DelegatedTask,
   DelegatedTaskStatus,
   Epic,
+  EpicMessage,
   PendingQuestion,
   SessionSummary,
 } from '@shared/types'
@@ -18,10 +19,16 @@ export interface EpicRollup {
   progress: number
   lastActivityAt: number
   owner: SessionSummary | null
-  /** The epic commander's own open question; only the human can answer it. */
+  /** The epic commander's own open question, if it has one. */
   ownerQuestion: PendingQuestion | null
-  /** Human messages the epic's commander has not answered yet. */
-  unanswered: number
+  /** Whether that question is one the human can answer (board or terminal). */
+  ownerQuestionAnswerable: boolean
+  /** A session asked a question in the thread and nobody human has written since. */
+  threadQuestion: EpicMessage | null
+  /** Human messages after the last session message: the commander owes an answer. */
+  awaitingAnswer: number
+  /** Human messages no session has confirmed reading yet (delivery bookkeeping). */
+  undelivered: number
   /** True when something in this epic waits for the human, not for a session. */
   needsHuman: boolean
 }
@@ -43,6 +50,18 @@ function countsFor(tasks: DelegatedTask[]): Record<DelegatedTaskStatus, number> 
   return counts
 }
 
+/**
+ * A question the human can actually act on. A background session whose answer
+ * window closed cannot be answered from the board any more — its status line
+ * says to write in the thread instead, so it must not raise the badge.
+ */
+function answerableQuestion(owner: SessionSummary | null): PendingQuestion | null {
+  const question = owner?.question ?? null
+  if (!question) return null
+  if (question.answerable) return question
+  return owner && owner.kind !== 'background' ? question : null
+}
+
 export function epicRollup(
   epic: Epic,
   tasks: DelegatedTask[],
@@ -57,10 +76,32 @@ export function epicRollup(
           linked.length,
       )
     : 0
-  const unanswered = epic.messages.filter(
-    (message) => !message.authorSessionId && !message.deliveredAt,
-  ).length
+  // Status lines ("Epic status is now active.") are written by the system with
+  // no author; they are not the human talking and must not count as a question.
+  const humanMessages = epic.messages.filter(
+    (message) => !message.authorSessionId && message.kind !== 'status',
+  )
+  const lastSessionAt = epic.messages.reduce(
+    (at, message) =>
+      message.authorSessionId && message.kind !== 'status' ? Math.max(at, message.at) : at,
+    0,
+  )
+  const awaitingAnswer = humanMessages.filter((message) => message.at > lastSessionAt).length
+  const undelivered = humanMessages.filter((message) => !message.deliveredAt).length
+  // The last turn belongs either to the human (nothing open) or to a session;
+  // only a question from a session is a question for the human.
+  let threadQuestion: EpicMessage | null = null
+  for (let index = epic.messages.length - 1; index >= 0; index -= 1) {
+    const message = epic.messages[index]
+    if (!message) break
+    if (message.kind === 'status') continue
+    if (!message.authorSessionId) break
+    if (message.kind === 'question') threadQuestion = message
+    break
+  }
   const owner = sessions.find((session) => session.id === epic.ownerSessionId) ?? null
+  const ownerQuestion = owner?.question ?? null
+  const ownerQuestionAnswerable = Boolean(answerableQuestion(owner))
   const lastMessageAt = epic.messages[epic.messages.length - 1]?.at ?? 0
   const lastActivityAt = Math.max(
     epic.updatedAt,
@@ -77,12 +118,16 @@ export function epicRollup(
     progress,
     lastActivityAt,
     owner,
-    ownerQuestion: owner?.question ?? null,
-    unanswered,
-    // Review and blocked tasks are the epic commander's business; only an
-    // unanswered question, its own pending question or a blocked epic actually
-    // needs the human.
-    needsHuman: unanswered > 0 || Boolean(owner?.question) || epic.status === 'blocked',
+    ownerQuestion,
+    ownerQuestionAnswerable,
+    threadQuestion,
+    awaitingAnswer,
+    undelivered,
+    // Review and blocked tasks are the epic commander's business; a human
+    // comment is the commander's to answer, not a reason to badger the human.
+    // A question whose answer window closed cannot be answered from the board,
+    // so it only counts for a session that still has a terminal.
+    needsHuman: ownerQuestionAnswerable || Boolean(threadQuestion) || epic.status === 'blocked',
   }
 }
 
@@ -120,8 +165,11 @@ export function epicStatusLabel(rollup: EpicRollup): string {
   if (epic.status === 'cancelled') return 'Eingestellt'
   if (epic.status === 'paused') return 'Pausiert'
   if (epic.status === 'blocked' || counts.blocked > 0) return 'Blockiert'
-  if (rollup.unanswered > 0 || rollup.ownerQuestion) return 'Wartet auf dich'
+  if (rollup.ownerQuestionAnswerable || rollup.threadQuestion) return 'Wartet auf dich'
   if (counts.review > 0) return 'Zur Abnahme'
+  // The human wrote and the commander has not answered yet — that is work on
+  // the session side, so the label must not read like an alert.
+  if (rollup.awaitingAnswer > 0) return 'Antwortet noch'
   if (counts.in_progress > 0) return 'Läuft'
   if (counts.queued > 0) return 'Wartet'
   return 'Aktiv'

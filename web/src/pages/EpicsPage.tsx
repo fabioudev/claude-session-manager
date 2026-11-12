@@ -26,12 +26,8 @@ function repositoryNames(epic: Epic): string[] {
 
 function needsReason(rollup: EpicRollup): string {
   const parts: string[] = []
-  if (rollup.unanswered > 0) {
-    parts.push(
-      `${rollup.unanswered} ${rollup.unanswered === 1 ? 'Frage' : 'Fragen'} im Epic-Thread`,
-    )
-  }
   if (rollup.ownerQuestion) parts.push('Epic-Commander wartet auf deine Antwort')
+  if (rollup.threadQuestion) parts.push('Frage im Thread offen')
   if (rollup.epic.status === 'blocked') parts.push('Epic ist blockiert')
   return parts.join(' · ')
 }
@@ -137,7 +133,7 @@ export function EpicsPage() {
                 to={`/epics/${encodeURIComponent(rollup.epic.id)}`}
               >
                 <span className="epic-need-icon">
-                  {rollup.unanswered > 0 || rollup.ownerQuestion ? (
+                  {rollup.ownerQuestion || rollup.threadQuestion ? (
                     <MessageCircle size={16} aria-hidden="true" />
                   ) : (
                     <CircleAlert size={16} aria-hidden="true" />

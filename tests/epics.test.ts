@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -8,6 +8,7 @@ import type {
   Epic,
   LaunchSessionInput,
   LaunchSessionResult,
+  PendingQuestion,
   PromptResult,
   SessionSummary,
 } from '../shared/types.js'
@@ -286,15 +287,54 @@ describe('epics', () => {
     expect(deliveries).toHaveLength(0)
   })
 
-  it('leaves a question pending when the epic has no commander and nudges the commander', async () => {
+  it('marks a human message read when the main commander takes it for an unowned epic', async () => {
     const { service, deliveries } = await harness()
     const epic = await service.createEpic({ title: 'Unowned' }, null)
     deliveries.length = 0
     const updated = await service.postEpicMessage(epic.id, { body: 'Wer macht das?' }, null)
-    expect(updated.messages.at(-1)?.deliveredAt).toBeNull()
+    // The nudge carries the text, so the commander has it: leaving the message
+    // "not read" kept the epic flagged as "Braucht dich" although it was answered.
+    expect(updated.messages.at(-1)?.deliveredAt).not.toBeNull()
     expect(deliveries).toHaveLength(1)
     expect(deliveries[0].id).toBe('commander')
     expect(deliveries[0].text).toContain('No epic commander owns it yet')
+  })
+
+  it('leaves a question pending when no commander and no owner can take it', async () => {
+    const { service, deliveries } = await harness()
+    await service.setCommander(null)
+    const epic = await service.createEpic({ title: 'Unowned' }, null)
+    deliveries.length = 0
+    const updated = await service.postEpicMessage(epic.id, { body: 'Wer macht das?' }, null)
+    expect(updated.messages.at(-1)?.deliveredAt).toBeNull()
+    expect(deliveries).toHaveLength(0)
+  })
+
+  it('marks earlier human messages read as soon as a session answers in the thread', async () => {
+    const { service } = await harness({
+      sendPrompt: async () => ({
+        ok: true,
+        mode: 'queued',
+        note: 'The session is working; the prompt waits for its next turn.',
+      }),
+    })
+    const epic = await service.createEpic(
+      { title: 'Thread', ownerSessionId: 'epic-owner' },
+      'commander',
+    )
+    await service.postEpicMessage(epic.id, { body: 'Erste Frage' }, null)
+    await service.postEpicMessage(epic.id, { body: 'Zweite Frage' }, null)
+    const pending = service.snapshot().epics.find((item) => item.id === epic.id)
+    expect(
+      pending?.messages.filter((item) => !item.authorSessionId).every((item) => !item.deliveredAt),
+    ).toBe(true)
+
+    await service.postEpicMessage(epic.id, { body: 'Ich antworte.', kind: 'answer' }, 'epic-owner')
+
+    const reread = service.snapshot().epics.find((item) => item.id === epic.id)
+    const human = reread?.messages.filter((item) => !item.authorSessionId) ?? []
+    expect(human).toHaveLength(2)
+    expect(human.every((item) => item.deliveredAt !== null)).toBe(true)
   })
 
   it('nudges the main commander when the epic commander is not running', async () => {
@@ -310,10 +350,80 @@ describe('epics', () => {
     )
     deliveries.length = 0
     const updated = await service.postEpicMessage(epic.id, { body: 'Bist du da?' }, null)
-    expect(updated.messages.at(-1)?.deliveredAt).toBeNull()
+    expect(updated.messages.at(-1)?.deliveredAt).not.toBeNull()
     expect(deliveries).toHaveLength(1)
     expect(deliveries[0].id).toBe('commander')
     expect(deliveries[0].text).toContain('is not running')
+  })
+
+  it('brings a blocked epic back to active when its commander starts', async () => {
+    let attempt = 0
+    const { service } = await harness({
+      launchSession: async () => {
+        attempt += 1
+        return attempt === 1
+          ? { ok: false, error: 'tmux is missing' }
+          : { ok: true, sessionId: 'epic-owner-2', jobId: 'job-2' }
+      },
+    })
+    const epic = await service.createEpic({ title: 'Retry' }, 'commander')
+    const failed = await service.spawnEpicCommander(epic.id, {}, 'commander')
+    expect(failed.status).toBe('blocked')
+    const started = await service.spawnEpicCommander(epic.id, {}, 'commander')
+    expect(started.status).toBe('active')
+    expect(started.ownerSessionId).toBe('epic-owner-2')
+  })
+
+  it('heals the read receipt of a human message a session already answered', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'csm-epic-'))
+    dirs.push(dir)
+    const epic = sampleEpic({
+      messages: [
+        {
+          id: 'h1',
+          at: 5,
+          authorSessionId: null,
+          kind: 'question',
+          body: 'Wie weit?',
+          deliveredAt: null,
+        },
+        {
+          id: 's1',
+          at: 6,
+          authorSessionId: 'owner',
+          kind: 'answer',
+          body: 'Fertig.',
+          deliveredAt: 6,
+        },
+      ],
+    })
+    await writeFile(
+      path.join(dir, 'command-center.json'),
+      JSON.stringify({
+        version: 1,
+        commanderSessionId: null,
+        tasks: [],
+        epics: [epic],
+        knowledge: [],
+        decisions: [],
+        commands: [],
+        updates: [],
+      }),
+    )
+    const service = new OrchestrationService({
+      dataDir: dir,
+      readOnly: () => false,
+      getSession: () => null,
+      sendPrompt: async () => ({ ok: true, mode: 'typed', note: 'Delivered.' }),
+      listSessions: () => [],
+      commanderCwd: '/work',
+      onChange: vi.fn(),
+      now: () => 10_000,
+    })
+    await service.init()
+
+    const healed = service.snapshot().epics.find((item) => item.id === epic.id)
+    expect(healed?.messages[0]?.deliveredAt).toBe(6)
   })
 
   it('moves commander, epic owners and task assignees to a woken copy', async () => {
@@ -456,20 +566,35 @@ function sampleTask(
   }
 }
 
+function message(overrides: Partial<Epic['messages'][number]> = {}): Epic['messages'][number] {
+  return {
+    id: `m${Math.random().toString(36).slice(2, 8)}`,
+    at: 6,
+    authorSessionId: null,
+    kind: 'question',
+    body: 'Wie weit?',
+    deliveredAt: null,
+    ...overrides,
+  }
+}
+
+function question(overrides: Partial<PendingQuestion> = {}): PendingQuestion {
+  return {
+    id: 'q1',
+    sessionId: 'owner',
+    toolUseId: null,
+    prompts: [{ question: 'Darf ich das alte APK löschen?', header: 'DEV', options: [] }],
+    createdAt: 9,
+    expiresAt: null,
+    answerable: true,
+    source: 'hook',
+    ...overrides,
+  }
+}
+
 describe('epic rollups', () => {
-  it('counts done work as 100% and derives open tasks and needs-you', () => {
-    const epic = sampleEpic({
-      messages: [
-        {
-          id: 'm1',
-          at: 6,
-          authorSessionId: null,
-          kind: 'question',
-          body: 'Wie weit?',
-          deliveredAt: null,
-        },
-      ],
-    })
+  it('counts done work as 100% and counts a human comment the commander still owes an answer', () => {
+    const epic = sampleEpic({ messages: [message()] })
     const tasks = [
       sampleTask({ id: 'a', epicId: epic.id, status: 'done', progress: 0 }),
       sampleTask({ id: 'b', epicId: epic.id, status: 'in_progress', progress: 50 }),
@@ -481,9 +606,69 @@ describe('epic rollups', () => {
     expect(rollup.done).toBe(1)
     expect(rollup.progress).toBe(75)
     expect(rollup.openTasks.map((task) => task.id)).toEqual(['b'])
-    expect(rollup.unanswered).toBe(1)
-    expect(rollup.needsHuman).toBe(true)
+    expect(rollup.awaitingAnswer).toBe(1)
+    expect(rollup.undelivered).toBe(1)
+    // The human already did their part: the commander owes the answer.
+    expect(rollup.needsHuman).toBe(false)
+    expect(epicStatusLabel(rollup)).toBe('Antwortet noch')
     expect(rollup.lastActivityAt).toBe(6)
+  })
+
+  it('does not count system status lines as human questions', () => {
+    const epic = sampleEpic({
+      messages: [message({ kind: 'status', body: 'Epic status is now active.' })],
+    })
+    const rollup = epicRollup(epic, [], [])
+    expect(rollup.awaitingAnswer).toBe(0)
+    expect(rollup.undelivered).toBe(0)
+    expect(rollup.needsHuman).toBe(false)
+  })
+
+  it('stops counting a human message once a session answered after it', () => {
+    const epic = sampleEpic({
+      messages: [
+        message({ id: 'h1', at: 5 }),
+        message({ id: 's1', at: 6, authorSessionId: 'owner', kind: 'answer' }),
+      ],
+    })
+    const rollup = epicRollup(epic, [], [])
+    expect(rollup.awaitingAnswer).toBe(0)
+    expect(rollup.undelivered).toBe(1)
+    expect(rollup.needsHuman).toBe(false)
+  })
+
+  it('flags a session question in the thread until the human answers it', () => {
+    const asked = sampleEpic({
+      messages: [message({ authorSessionId: 'owner', kind: 'question', deliveredAt: 6 })],
+    })
+    const rollup = epicRollup(asked, [], [makeSession({ id: 'owner' })])
+    expect(rollup.threadQuestion?.kind).toBe('question')
+    expect(rollup.needsHuman).toBe(true)
+    // A status line written after the question must not hide it.
+    const withStatus = epicRollup(
+      sampleEpic({
+        messages: [
+          message({ authorSessionId: 'owner', kind: 'question', deliveredAt: 6 }),
+          message({ kind: 'status', at: 7, body: 'Epic status is now active.' }),
+        ],
+      }),
+      [],
+      [makeSession({ id: 'owner' })],
+    )
+    expect(withStatus.needsHuman).toBe(true)
+
+    const answered = epicRollup(
+      sampleEpic({
+        messages: [
+          message({ authorSessionId: 'owner', kind: 'question', deliveredAt: 6 }),
+          message({ kind: 'note', at: 7, body: 'Ja, bitte.' }),
+        ],
+      }),
+      [],
+      [makeSession({ id: 'owner' })],
+    )
+    expect(answered.threadQuestion).toBeNull()
+    expect(answered.needsHuman).toBe(false)
   })
 
   it('does not flag an epic as needing the human for review or blocked tasks', () => {
@@ -506,24 +691,40 @@ describe('epic rollups', () => {
       id: 'owner',
       name: 'Epic Owner',
       status: 'waiting',
-      question: {
-        id: 'q1',
-        sessionId: 'owner',
-        toolUseId: null,
-        prompts: [{ question: 'Darf ich das alte APK löschen?', header: 'DEV', options: [] }],
-        createdAt: 9,
-        expiresAt: null,
-        answerable: true,
-        source: 'hook',
-      },
+      question: question(),
     })
     const rollup = epicRollup(epic, [], [owner])
     expect(rollup.ownerQuestion?.id).toBe('q1')
+    expect(rollup.ownerQuestionAnswerable).toBe(true)
     expect(rollup.needsHuman).toBe(true)
     expect(epicStatusLabel(rollup)).toBe('Wartet auf dich')
 
     const idle = epicRollup(epic, [], [makeSession({ id: 'owner' })])
     expect(idle.needsHuman).toBe(false)
+  })
+
+  it('keeps a question whose answer window closed from raising the badge', () => {
+    const epic = sampleEpic({ ownerSessionId: 'owner' })
+    const background = makeSession({
+      id: 'owner',
+      kind: 'background',
+      status: 'waiting',
+      question: question({ answerable: false }),
+    })
+    const stale = epicRollup(epic, [], [background])
+    // A background session has no terminal, so the human cannot answer it —
+    // the page says to write in the thread, and it must not nag as "Braucht dich".
+    expect(stale.ownerQuestion?.id).toBe('q1')
+    expect(stale.ownerQuestionAnswerable).toBe(false)
+    expect(stale.needsHuman).toBe(false)
+
+    const interactive = makeSession({
+      id: 'owner',
+      kind: 'interactive',
+      status: 'waiting',
+      question: question({ answerable: false }),
+    })
+    expect(epicRollup(epic, [], [interactive]).needsHuman).toBe(true)
   })
 
   it('sorts closed epics last and reports standalone open tasks', () => {

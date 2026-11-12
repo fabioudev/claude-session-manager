@@ -237,6 +237,32 @@ export class OrchestrationService {
       }
       this.state = emptyState()
     }
+    await this.healEpicReadReceipts()
+  }
+
+  /**
+   * An older build only marked a human message read when it was typed into the
+   * epic owner; a session that replied in the thread left the earlier messages
+   * "not read" forever, so the epic kept showing "Braucht dich" although it had
+   * answered. A reply proves those messages were read, so adopt that once.
+   */
+  private async healEpicReadReceipts(): Promise<void> {
+    let changed = false
+    for (const epic of this.state.epics) {
+      const lastSessionAt = epic.messages.reduce(
+        (at, message) =>
+          message.authorSessionId && message.kind !== 'status' ? Math.max(at, message.at) : at,
+        0,
+      )
+      if (!lastSessionAt) continue
+      for (const message of epic.messages) {
+        if (message.authorSessionId || message.kind === 'status' || message.deliveredAt) continue
+        if (message.at >= lastSessionAt) continue
+        message.deliveredAt = lastSessionAt
+        changed = true
+      }
+    }
+    if (changed && !this.options.readOnly()) await this.commit()
   }
 
   snapshot(): CommandCenterSnapshot {
@@ -605,7 +631,18 @@ export class OrchestrationService {
       revision: epic.revision + 1,
     }
     this.state.epics[index] = updated
-    if (!actorSessionId) await this.deliverEpicMessage(updated, message)
+    if (actorSessionId) {
+      // A session answering in the thread has seen what the human wrote before
+      // it. Whatever the delivery bookkeeping says, those messages are read now;
+      // leaving them pending keeps a "Braucht dich" badge alive forever.
+      for (const earlier of updated.messages) {
+        if (!earlier.authorSessionId && earlier.kind !== 'status' && !earlier.deliveredAt) {
+          earlier.deliveredAt = this.now()
+        }
+      }
+    } else {
+      await this.deliverEpicMessage(updated, message)
+    }
     await this.commit()
     return updated
   }
@@ -644,6 +681,9 @@ export class OrchestrationService {
     }
     if (result.ok) {
       draft.ownerSessionId = result.sessionId ?? null
+      // A failed earlier attempt marked the epic blocked; a commander that is
+      // running now means that is over, so the badge must not stay.
+      if (draft.status === 'blocked') draft.status = 'active'
       this.pushEpicMessage(
         draft,
         actorSessionId,
@@ -1132,10 +1172,10 @@ export class OrchestrationService {
   }
 
   /** A short prompt to the commander; a dead or absent commander is not an error. */
-  private async nudgeCommander(text: string): Promise<void> {
+  private async nudgeCommander(text: string): Promise<PromptResult | null> {
     const commanderId = this.state.commanderSessionId
-    if (!commanderId || !this.options.getSession(commanderId)) return
-    await this.options.sendPrompt(commanderId, text).catch(() => undefined)
+    if (!commanderId || !this.options.getSession(commanderId)) return null
+    return this.options.sendPrompt(commanderId, text).catch(() => null)
   }
 
   /**
@@ -1245,14 +1285,17 @@ export class OrchestrationService {
     // would throw that dialog away.
     if (session.kind === 'background' && (session.backgroundState === 'blocked' || session.needs))
       return
+    const commander = sessionId === this.state.commanderSessionId
     const epics = this.state.epics.filter(
       (epic) =>
-        epic.ownerSessionId === sessionId && epic.status !== 'done' && epic.status !== 'cancelled',
+        (epic.ownerSessionId === sessionId || (commander && !epic.ownerSessionId)) &&
+        epic.status !== 'done' &&
+        epic.status !== 'cancelled',
     )
     let delivered = 0
     for (const epic of epics) {
       const pending = epic.messages.filter(
-        (message) => !message.authorSessionId && !message.deliveredAt,
+        (message) => !message.authorSessionId && message.kind !== 'status' && !message.deliveredAt,
       )
       for (const message of pending.slice(0, 3)) {
         const result = await this.options
@@ -1292,9 +1335,16 @@ export class OrchestrationService {
     const owners = new Set<string>()
     for (const epic of this.state.epics) {
       if (epic.status === 'done' || epic.status === 'cancelled') continue
-      if (!epic.ownerSessionId) continue
-      if (epic.messages.some((message) => !message.authorSessionId && !message.deliveredAt)) {
-        owners.add(epic.ownerSessionId)
+      // An epic without a commander is the main commander's business.
+      const owner = epic.ownerSessionId ?? this.state.commanderSessionId
+      if (!owner) continue
+      if (
+        epic.messages.some(
+          (message) =>
+            !message.authorSessionId && message.kind !== 'status' && !message.deliveredAt,
+        )
+      ) {
+        owners.add(owner)
       }
     }
     for (const owner of owners) await this.sessionIdle(owner)
@@ -1562,9 +1612,20 @@ export class OrchestrationService {
       (epic) =>
         epic.ownerSessionId === sessionId && epic.status !== 'done' && epic.status !== 'cancelled',
     )
-    const unanswered = ownedEpics.flatMap((epic) =>
+    // The main commander answers epics nobody owns yet, so their human messages
+    // belong in its prompt too — otherwise they stay pending forever although
+    // the commander is the one who replies.
+    const orphanedEpics = commander
+      ? this.state.epics.filter(
+          (epic) => !epic.ownerSessionId && epic.status !== 'done' && epic.status !== 'cancelled',
+        )
+      : []
+    const unanswered = [...ownedEpics, ...orphanedEpics].flatMap((epic) =>
       epic.messages
-        .filter((message) => !message.authorSessionId && !message.deliveredAt)
+        .filter(
+          (message) =>
+            !message.authorSessionId && message.kind !== 'status' && !message.deliveredAt,
+        )
         .map((message) => ({ epic, message })),
     )
     if (
@@ -1878,13 +1939,17 @@ export class OrchestrationService {
   private async deliverEpicMessage(epic: Epic, message: EpicMessage): Promise<void> {
     const owner = epic.ownerSessionId
     if (!owner) {
-      await this.nudgeCommander(
+      const result = await this.nudgeCommander(
         [
           `[Epic ${epic.id}] The human wrote in "${epic.title}":`,
           truncate(message.body, 1500),
           'No epic commander owns it yet. Answer in the epic thread with post_epic_message, or start one with spawn_epic_commander, and keep the status line current.',
         ].join('\n'),
       )
+      // The nudge carries the text itself, so a typed prompt means the commander
+      // has it — otherwise the message would stay "not read" although it was
+      // answered (which is what made the epic page nag forever).
+      if (result?.ok && result.mode === 'typed') message.deliveredAt = this.now()
       return
     }
     const session = this.options.getSession(owner)
@@ -1892,13 +1957,14 @@ export class OrchestrationService {
       // The owner is not running, so the message cannot be delivered. It stays
       // pending (the epic page says "not read yet") and the main commander gets
       // told, because restarting or replacing that epic commander is its job.
-      await this.nudgeCommander(
+      const result = await this.nudgeCommander(
         [
           `[Epic ${epic.id}] The human wrote in "${epic.title}":`,
           truncate(message.body, 1500),
           `Its epic commander (${shortId(owner)}) is not running, so the message waits. Answer in the epic thread with post_epic_message, or start a new epic commander with spawn_epic_commander.`,
         ].join('\n'),
       )
+      if (result?.ok && result.mode === 'typed') message.deliveredAt = this.now()
       return
     }
     const result = await this.options
