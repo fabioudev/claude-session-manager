@@ -31,6 +31,7 @@ function needsReason(rollup: EpicRollup): string {
       `${rollup.unanswered} ${rollup.unanswered === 1 ? 'Frage' : 'Fragen'} im Epic-Thread`,
     )
   }
+  if (rollup.ownerQuestion) parts.push('Epic-Commander wartet auf deine Antwort')
   if (rollup.epic.status === 'blocked') parts.push('Epic ist blockiert')
   return parts.join(' · ')
 }
@@ -136,7 +137,7 @@ export function EpicsPage() {
                 to={`/epics/${encodeURIComponent(rollup.epic.id)}`}
               >
                 <span className="epic-need-icon">
-                  {rollup.unanswered > 0 ? (
+                  {rollup.unanswered > 0 || rollup.ownerQuestion ? (
                     <MessageCircle size={16} aria-hidden="true" />
                   ) : (
                     <CircleAlert size={16} aria-hidden="true" />

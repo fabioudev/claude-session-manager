@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -193,6 +193,26 @@ export function isPidAlive(pid: number | undefined | null): boolean {
     return true
   } catch {
     return false
+  }
+}
+
+/**
+ * The kernel's start time of a process, in clock ticks since boot. Together with
+ * the pid it names one process for good: a pid handed out again later gets a
+ * new start time, so a stale record cannot keep a dead process "alive".
+ * Returns null where `/proc` does not exist (macOS, Windows).
+ */
+export async function processStartTime(pid: number): Promise<string | null> {
+  if (pid <= 0) return null
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8')
+    // The command name can contain spaces and parentheses, so the fields are
+    // only safe to count from behind the last closing parenthesis.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    // Field 3 is the state, which makes field 22 the 20th entry after it.
+    return fields[19] ?? null
+  } catch {
+    return null
   }
 }
 

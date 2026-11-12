@@ -51,6 +51,12 @@ export interface WakeInput {
   backgroundExited?: boolean
   /** The session is at a question only the person can answer. */
   hasQuestion: boolean
+  /**
+   * That question's answer window is gone (`answerable: false`). For a
+   * background session there was never a terminal to fall back on, so the
+   * prompt is what ends the wait instead of being held back by it.
+   */
+  questionExpired?: boolean
   supported: boolean
   launchEnabled: boolean
   readOnly: boolean
@@ -73,7 +79,12 @@ export function wakeDecision(input: WakeInput): WakeDecision {
   if (!input.launchEnabled) return no('Launching sessions is disabled in the settings.')
   if (!input.supported) return no('Waking a background session is only supported on Linux.')
   if (!input.session.jobId) return no('This session is not a background job.')
-  if (input.hasQuestion) return no('The session is answering a question right now.')
+  // Answering in a web dialog only works while the question is open. Once it
+  // expired the session waits at a question nobody can reach, so the prompt has
+  // to become the next turn — which is exactly what a wake does.
+  if (input.hasQuestion && !input.questionExpired) {
+    return no('The session is answering a question right now.')
+  }
   if (input.session.archived) return no('This session is archived.')
   // A dead job cannot be working, whatever its last written state claims: the
   // process was stopped (or the manager restarted) before it could record the

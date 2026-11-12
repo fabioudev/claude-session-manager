@@ -379,6 +379,18 @@ export function looksLikeTrustPrompt(paneText: string): boolean {
 }
 
 /**
+ * Claude Code's notice about the auto-mode classifier bill shows up once per
+ * upgrade and blocks the session until someone presses Enter. It says nothing
+ * about the code being worked on, so the board may dismiss it by itself.
+ */
+export function looksLikeAutoModeNotice(paneText: string): boolean {
+  return (
+    /no longer charge for classifier requests/i.test(paneText) &&
+    /Enter to continue/i.test(paneText)
+  )
+}
+
+/**
  * The folders Claude Code has already been trusted for, read from its config
  * (`<claudeDir>.json`). Trust is per exact folder — trusting a repository does
  * not cover its subfolders. Returns null when the config cannot be read, so

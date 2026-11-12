@@ -1,7 +1,7 @@
 import type { Dirent } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
-import { isPidAlive, pathExists, safeJsonParse } from './util.js'
+import { isPidAlive, pathExists, processStartTime, safeJsonParse } from './util.js'
 
 export interface LiveSession {
   sessionId: string
@@ -43,9 +43,56 @@ export interface BackgroundJob {
    * The job's process is gone. Claude Code writes `adopt.json` into a job folder
    * only when the job ended, so a folder with that file is history — even when
    * its `state.json` still says "working" because the process was killed before
-   * it could record the exit.
+   * it could record the exit. A killed job can leave neither file behind, so the
+   * process table is checked as well (see `liveJobIds`).
    */
   exited: boolean
+  /**
+   * Claude Code reports the job is waiting for an answer (`tempo: "blocked"` or
+   * questions under `block`), even while `state` still says "working".
+   */
+  blocked: boolean
+}
+
+/** A job started seconds ago has not spawned its host process yet. */
+const JOB_START_GRACE_MS = 60_000
+
+/**
+ * The jobs Claude Code's daemon lists as running. The daemon keeps
+ * `workers[jobId]` in `daemon/roster.json` only while the job has a live host
+ * process, and records the process start time so a reused pid cannot pretend to
+ * be it. That file is the truthful answer to "is this job still running", which
+ * `state.json` is not: a job killed before it could write its exit keeps saying
+ * "working" forever. Returns null when there is no roster (no daemon, or an
+ * older Claude Code), so callers fall back to `state.json` alone.
+ */
+export async function runningJobIds(
+  rosterFile: string,
+  pidAlive: (pid: number) => boolean = isPidAlive,
+): Promise<Set<string> | null> {
+  let raw: string
+  try {
+    raw = await readFile(rosterFile, 'utf8')
+  } catch {
+    return null
+  }
+  const parsed = safeJsonParse(raw) as { workers?: unknown } | null
+  const workers = parsed?.workers
+  if (!workers || typeof workers !== 'object') return null
+  const live = new Set<string>()
+  for (const [jobId, worker] of Object.entries(workers as Record<string, unknown>)) {
+    if (!worker || typeof worker !== 'object') continue
+    const entry = worker as { pid?: unknown; procStart?: unknown }
+    const pid = typeof entry.pid === 'number' ? entry.pid : null
+    if (!pid || !pidAlive(pid)) continue
+    const expected = typeof entry.procStart === 'string' ? entry.procStart : null
+    if (expected) {
+      const actual = await processStartTime(pid)
+      if (actual !== null && actual !== expected) continue
+    }
+    live.add(jobId)
+  }
+  return live
 }
 
 export interface RegistrySnapshot {
@@ -132,6 +179,9 @@ function parseJob(jobId: string, raw: unknown, exited: boolean): BackgroundJob |
         })
         .filter((item): item is { id: string; label: string; done: boolean } => !!item)
     : []
+  const block = value.block as { questions?: unknown } | undefined
+  const blocked =
+    value.tempo === 'blocked' || (Array.isArray(block?.questions) && block.questions.length > 0)
   return {
     jobId,
     sessionId: asString(value.sessionId) ?? asString(value.resumeSessionId),
@@ -149,17 +199,20 @@ function parseJob(jobId: string, raw: unknown, exited: boolean): BackgroundJob |
     permissionMode: permissionIndex >= 0 ? (flags[permissionIndex + 1] ?? null) : null,
     fan,
     exited,
+    blocked,
   }
 }
 
 /**
  * Reads the registries Claude Code maintains for us: interactive/background
- * sessions in `sessions/<pid>.json`, and background jobs in `jobs/<id>/state.json`.
- * Polling these files is far cheaper and more reliable than shelling out to the CLI.
+ * sessions in `sessions/<pid>.json`, background jobs in `jobs/<id>/state.json`,
+ * and the daemon's live worker roster in `daemon/roster.json`. Polling these
+ * files is far cheaper and more reliable than shelling out to the CLI.
  */
 export class ClaudeRegistry {
   private readonly sessionsDir: string
   private readonly jobsDir: string
+  private readonly rosterFile: string
   private snapshot: RegistrySnapshot = { sessions: [], jobs: [], refreshedAt: 0 }
   private timer: NodeJS.Timeout | null = null
   private refreshing = false
@@ -168,10 +221,14 @@ export class ClaudeRegistry {
   constructor(options: {
     sessionsDir: string
     jobsDir: string
+    /** Claude Code's daemon roster; defaults to the sibling of the jobs folder. */
+    rosterFile?: string
     onChange?: () => void
   }) {
     this.sessionsDir = options.sessionsDir
     this.jobsDir = options.jobsDir
+    this.rosterFile =
+      options.rosterFile ?? path.join(path.dirname(options.jobsDir), 'daemon', 'roster.json')
     this.onChange = options.onChange
   }
 
@@ -226,6 +283,7 @@ export class ClaudeRegistry {
       return []
     }
     const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000
+    const runningJobs = await runningJobIds(this.rosterFile)
     const jobs: BackgroundJob[] = []
     await Promise.all(
       dirs
@@ -237,6 +295,18 @@ export class ClaudeRegistry {
             const exited = await pathExists(path.join(dir, 'adopt.json'))
             const job = parseJob(entry.name, safeJsonParse(text), exited)
             if (!job) return
+            // A job that claims to be working but is not in the daemon's roster is
+            // gone: it was killed (or the machine rebooted) before it could write
+            // its exit. A job started seconds ago has simply not registered yet.
+            if (
+              !job.exited &&
+              runningJobs &&
+              (job.state === 'working' || job.state === 'blocked') &&
+              !runningJobs.has(job.jobId) &&
+              Date.now() - (job.updatedAt ?? 0) > JOB_START_GRACE_MS
+            ) {
+              job.exited = true
+            }
             // Old blocked/finished jobs stay on disk forever; they are history, not
             // something the board should show every day.
             if ((job.updatedAt ?? 0) < cutoff) return

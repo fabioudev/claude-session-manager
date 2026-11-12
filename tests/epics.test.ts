@@ -449,6 +449,32 @@ describe('epic rollups', () => {
     expect(blockedEpic.needsHuman).toBe(true)
   })
 
+  it('flags an epic whose own commander is waiting for an answer', () => {
+    const epic = sampleEpic({ ownerSessionId: 'owner' })
+    const owner = makeSession({
+      id: 'owner',
+      name: 'Epic Owner',
+      status: 'waiting',
+      question: {
+        id: 'q1',
+        sessionId: 'owner',
+        toolUseId: null,
+        prompts: [{ question: 'Darf ich das alte APK löschen?', header: 'DEV', options: [] }],
+        createdAt: 9,
+        expiresAt: null,
+        answerable: true,
+        source: 'hook',
+      },
+    })
+    const rollup = epicRollup(epic, [], [owner])
+    expect(rollup.ownerQuestion?.id).toBe('q1')
+    expect(rollup.needsHuman).toBe(true)
+    expect(epicStatusLabel(rollup)).toBe('Wartet auf dich')
+
+    const idle = epicRollup(epic, [], [makeSession({ id: 'owner' })])
+    expect(idle.needsHuman).toBe(false)
+  })
+
   it('sorts closed epics last and reports standalone open tasks', () => {
     const open = sampleEpic({ id: 'open', updatedAt: 10 })
     const closed = sampleEpic({ id: 'closed', status: 'done', updatedAt: 99 })

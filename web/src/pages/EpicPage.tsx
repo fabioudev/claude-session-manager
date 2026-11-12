@@ -13,6 +13,7 @@ import { type FormEvent, type KeyboardEvent, useEffect, useMemo, useRef, useStat
 import { Link, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { Markdown } from '../components/Markdown'
+import { useQuestionDialog } from '../components/QuestionDialog'
 import { useToast } from '../components/Toast'
 import { epicRollup, epicStatusLabel, epicTone } from '../lib/epics'
 import { dayTime, relativeTime, sessionLabel } from '../lib/format'
@@ -78,6 +79,7 @@ export function EpicPage() {
   const { id = '' } = useParams()
   const { sessions, commandCenter, config } = useLive()
   const { notify } = useToast()
+  const { openQuestion } = useQuestionDialog()
   const [text, setText] = useState('')
   const [pending, setPending] = useState(false)
   const [starting, setStarting] = useState(false)
@@ -115,6 +117,7 @@ export function EpicPage() {
   }
 
   const owner = rollup.owner
+  const ownerQuestion = rollup.ownerQuestion
   const repoPaths = epic.repositories
 
   async function submit(event?: FormEvent) {
@@ -284,6 +287,31 @@ export function EpicPage() {
               <span className="attention-count">{rollup.unanswered}</span>
             ) : null}
           </div>
+          {ownerQuestion ? (
+            <div className="epic-question">
+              <div>
+                <span className="epic-question-kicker">
+                  {owner ? sessionLabel(owner) : 'Der Epic-Commander'} wartet auf deine Antwort
+                </span>
+                <p>{ownerQuestion.prompts[0]?.question ?? 'Der Epic-Commander hat eine Frage.'}</p>
+              </div>
+              {ownerQuestion.answerable && !readOnly ? (
+                <button
+                  className="btn btn-primary"
+                  type="button"
+                  onClick={() => openQuestion(ownerQuestion)}
+                >
+                  Beantworten
+                </button>
+              ) : (
+                <small>
+                  {owner?.kind === 'background'
+                    ? 'Die Frage ist ohne Antwort abgelaufen. Schreib im Thread — das weckt die Session wieder.'
+                    : 'Antwort im Terminal der Session.'}
+                </small>
+              )}
+            </div>
+          ) : null}
           <div className="epic-thread-body" ref={threadBody}>
             {messages.length ? (
               messages.map((message) => {

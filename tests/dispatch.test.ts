@@ -116,6 +116,26 @@ describe('wakeDecision', () => {
     expect(wakeDecision({ ...background, hasQuestion: true }).wake).toBe(false)
   })
 
+  it('wakes a session whose question expired, because no terminal can answer it', () => {
+    expect(
+      wakeDecision({
+        ...background,
+        hasQuestion: true,
+        questionExpired: true,
+        backgroundState: 'blocked',
+      }),
+    ).toEqual({ wake: true, stop: true })
+    // An expired question on a job that still works must not become a copy.
+    expect(
+      wakeDecision({
+        ...background,
+        hasQuestion: true,
+        questionExpired: true,
+        backgroundState: 'working',
+      }).wake,
+    ).toBe(false)
+  })
+
   it('does not wake a session without a background job', () => {
     expect(
       wakeDecision({

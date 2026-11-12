@@ -13,6 +13,7 @@ import {
   isInteractiveShell,
   isShellCommand,
   launcherSpec,
+  looksLikeAutoModeNotice,
   looksLikeTrustPrompt,
   parseLauncher,
   processEnvValue,
@@ -277,6 +278,27 @@ describe('looksLikeTrustPrompt', () => {
 
   it('leaves an ordinary pane alone', () => {
     expect(looksLikeTrustPrompt('❯ \n✻ Sautéed for 4m · done')).toBe(false)
+  })
+})
+
+describe('looksLikeAutoModeNotice', () => {
+  const pane = [
+    "We're changing auto mode to no longer charge for classifier requests in Claude Code.",
+    '',
+    "However, this session isn't eligible because your requests go through 127.0.0.1:11434.",
+    '',
+    'Enter to continue · Esc to cancel',
+  ].join('\n')
+
+  it('recognises the informational auto-mode notice', () => {
+    expect(looksLikeAutoModeNotice(pane)).toBe(true)
+  })
+
+  it('never treats a trust or permission dialog as that notice', () => {
+    expect(looksLikeTrustPrompt(pane)).toBe(false)
+    expect(
+      looksLikeAutoModeNotice('Do you want to allow this Bash command?\n❯ 1. Yes\n  2. No'),
+    ).toBe(false)
   })
 })
 

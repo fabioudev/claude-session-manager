@@ -3,6 +3,7 @@ import type {
   DelegatedTask,
   DelegatedTaskStatus,
   Epic,
+  PendingQuestion,
   SessionSummary,
 } from '@shared/types'
 
@@ -17,6 +18,8 @@ export interface EpicRollup {
   progress: number
   lastActivityAt: number
   owner: SessionSummary | null
+  /** The epic commander's own open question; only the human can answer it. */
+  ownerQuestion: PendingQuestion | null
   /** Human messages the epic's commander has not answered yet. */
   unanswered: number
   /** True when something in this epic waits for the human, not for a session. */
@@ -57,6 +60,7 @@ export function epicRollup(
   const unanswered = epic.messages.filter(
     (message) => !message.authorSessionId && !message.deliveredAt,
   ).length
+  const owner = sessions.find((session) => session.id === epic.ownerSessionId) ?? null
   const lastMessageAt = epic.messages[epic.messages.length - 1]?.at ?? 0
   const lastActivityAt = Math.max(
     epic.updatedAt,
@@ -72,11 +76,13 @@ export function epicRollup(
     done: counts.done,
     progress,
     lastActivityAt,
-    owner: sessions.find((session) => session.id === epic.ownerSessionId) ?? null,
+    owner,
+    ownerQuestion: owner?.question ?? null,
     unanswered,
     // Review and blocked tasks are the epic commander's business; only an
-    // unanswered question or a blocked epic actually needs the human.
-    needsHuman: unanswered > 0 || epic.status === 'blocked',
+    // unanswered question, its own pending question or a blocked epic actually
+    // needs the human.
+    needsHuman: unanswered > 0 || Boolean(owner?.question) || epic.status === 'blocked',
   }
 }
 
@@ -114,7 +120,7 @@ export function epicStatusLabel(rollup: EpicRollup): string {
   if (epic.status === 'cancelled') return 'Eingestellt'
   if (epic.status === 'paused') return 'Pausiert'
   if (epic.status === 'blocked' || counts.blocked > 0) return 'Blockiert'
-  if (rollup.unanswered > 0) return 'Wartet auf dich'
+  if (rollup.unanswered > 0 || rollup.ownerQuestion) return 'Wartet auf dich'
   if (counts.review > 0) return 'Zur Abnahme'
   if (counts.in_progress > 0) return 'Läuft'
   if (counts.queued > 0) return 'Wartet'

@@ -53,6 +53,7 @@ import {
   isInteractiveShell,
   isShellCommand,
   launcherSpec,
+  looksLikeAutoModeNotice,
   looksLikeTrustPrompt,
   processCommandNames,
   processEnvValue,
@@ -110,6 +111,8 @@ const AUTO_RESTART_TICK_MS = 30_000
 const AUTO_RESTART_IDLE_MS = 3 * MINUTE
 const AUTO_RESTART_SPACING_MS = 30_000
 const RESTART_COOLDOWN_MS = 10 * MINUTE
+/** Long enough that a notice dismissed twice is a real reappearance. */
+const NOTICE_DISMISS_COOLDOWN_MS = 60_000
 const RESTART_SHELL_TIMEOUT_MS = 15_000
 const RESTART_START_TIMEOUT_MS = 10_000
 const RESTART_STABLE_MS = 1_500
@@ -330,6 +333,8 @@ export class SessionManager {
   private intervalTimer: NodeJS.Timeout | null = null
   private versionTimer: NodeJS.Timeout | null = null
   private autoRestartTimer: NodeJS.Timeout | null = null
+  private dialogTimer: NodeJS.Timeout | null = null
+  private readonly dismissedNotices = new Map<string, number>()
   private recomputing = false
   private recomputeAgain = false
   private closed = false
@@ -342,6 +347,12 @@ export class SessionManager {
   private readonly restarting = new Map<string, Promise<RestartSessionResult>>()
   private readonly autoRestartHistory = new Map<string, { at: number; signature: string }>()
   private readonly resuming = new Set<string>()
+  /**
+   * Session id -> time it was stopped on purpose to resume it as a copy. Its
+   * end is not a session ending: freeing its epics and nudging the commander
+   * would be answered by a freshly spawned duplicate while the copy starts.
+   */
+  private readonly replacing = new Map<string, number>()
   /** session id -> pid whose launch command has already been captured. */
   private readonly launchCapturedFor = new Map<string, number>()
 
@@ -388,6 +399,8 @@ export class SessionManager {
     this.versionTimer.unref?.()
     this.autoRestartTimer = setInterval(() => this.autoRestartTick(), AUTO_RESTART_TICK_MS)
     this.autoRestartTimer.unref?.()
+    this.dialogTimer = setInterval(() => void this.dismissNoticesTick(), 15_000)
+    this.dialogTimer.unref?.()
     void this.refreshInstalledVersions()
   }
 
@@ -742,8 +755,9 @@ export class SessionManager {
         this.store.setEnded(sessionId, clientAt)
         // A worker that still holds open tasks cannot finish them now. Waking
         // the commander here is what makes "the commander handles it" true
-        // without the human watching the board.
-        this.orchestration?.sessionEnded?.(sessionId)
+        // without the human watching the board. A session the manager stopped
+        // only to resume it is not done, though: its roles move to the copy.
+        if (!this.isReplacing(sessionId)) this.orchestration?.sessionEnded?.(sessionId)
         this.scheduleRecompute(0)
         return { output: null }
       }
@@ -936,19 +950,31 @@ export class SessionManager {
     body: string,
   ): Promise<PromptResult | null> {
     const job = this.jobFor(session.id)
+    const blocked = Boolean(job?.blocked) || job?.state === 'blocked'
     const decision = wakeDecision({
       session,
-      backgroundState: job?.state ?? null,
+      // A job waiting for an answer is stopped and resumed, exactly like one
+      // whose state file already says "blocked".
+      backgroundState: blocked ? 'blocked' : (job?.state ?? null),
       backgroundExited: job?.exited ?? false,
       hasQuestion: Boolean(session.question),
+      // An expired question has no terminal window left: on a background session
+      // that window never existed, so the guard must not hold the prompt back.
+      questionExpired: Boolean(session.question && !session.question.answerable),
       supported: restartSupported(),
       launchEnabled: this.store.getSettings().launchEnabled,
       readOnly: this.config.readOnly,
     })
     if (!decision.wake || !job) return null
     if (decision.stop) {
+      // The kill is ours, not the session's end: keep the epic and task roles
+      // where they are so the copy inherits them instead of the commander.
+      this.replacing.set(session.id, now())
       const stopped = await this.stopSession(session.id)
-      if (!stopped.ok) return null
+      if (!stopped.ok) {
+        this.replacing.delete(session.id)
+        return null
+      }
     }
     const result = await this.launchSession({
       cwd: session.projectPath || session.repoRoot || process.cwd(),
@@ -956,6 +982,9 @@ export class SessionManager {
       resumeSessionId: session.id,
     })
     if (!result.ok) {
+      // Nothing continues this conversation now, so its end is real after all.
+      this.replacing.delete(session.id)
+      this.scheduleRecompute(0)
       return {
         ok: false,
         mode: 'queued',
@@ -1830,6 +1859,40 @@ export class SessionManager {
       })
   }
 
+  /**
+   * Claude Code shows an informational notice on startup (the auto-mode
+   * classifier bill) that halts the whole session until Enter is pressed. It is
+   * not about the work being done, so the board clears it instead of leaving a
+   * session that looks alive but never continues.
+   */
+  private async dismissNoticesTick(): Promise<void> {
+    if (this.closed) return
+    if (this.config.readOnly || !restartSupported()) return
+    const at = now()
+    for (const live of this.registry.getSnapshot().sessions) {
+      if (!live.alive || !live.tmux || !live.waitingFor) continue
+      if (!/dialog/i.test(live.waitingFor)) continue
+      if (at - (this.dismissedNotices.get(live.sessionId) ?? 0) < NOTICE_DISMISS_COOLDOWN_MS)
+        continue
+      const pane = paneTarget(live.tmux)
+      if (!pane) continue
+      const text = await capturePane(pane, 40)
+      if (!text || !looksLikeAutoModeNotice(text)) continue
+      if (!(await sendEnter(pane))) continue
+      this.dismissedNotices.set(live.sessionId, at)
+      this.store.recordActivities(live.sessionId, [
+        {
+          id: `notice:${randomUUID()}`,
+          at,
+          kind: 'status',
+          title: 'Dismissed the auto-mode billing notice',
+          detail: 'The session was held at an informational notice; Enter resumed it.',
+        },
+      ])
+      this.scheduleRecompute(300)
+    }
+  }
+
   private refreshInstalledVersions(): Promise<void> {
     if (this.versionRefresh) return this.versionRefresh
     const task = (async () => {
@@ -1871,6 +1934,10 @@ export class SessionManager {
     if (this.autoRestartTimer) {
       clearInterval(this.autoRestartTimer)
       this.autoRestartTimer = null
+    }
+    if (this.dialogTimer) {
+      clearInterval(this.dialogTimer)
+      this.dialogTimer = null
     }
     for (const question of this.broker.pendingQuestions()) {
       this.broker.cancelForSession(question.sessionId, 'terminal')
@@ -2092,6 +2159,13 @@ export class SessionManager {
     return this.registry.getSnapshot().jobs.find((job) => job.sessionId === id) ?? null
   }
 
+  /** Was this session stopped in order to resume it as a copy, just now? */
+  private isReplacing(id: string): boolean {
+    const at = this.replacing.get(id)
+    if (at === undefined) return false
+    return now() - at < 2 * MINUTE
+  }
+
   private async buildSummary(
     id: string,
     view: TranscriptView | null,
@@ -2126,8 +2200,8 @@ export class SessionManager {
       ? { ...questionBase, answerable: questionBase.answerable && !this.config.readOnly }
       : null
 
-    const jobWorking = job?.state === 'working' && !job?.exited
-    const jobBlocked = job?.state === 'blocked' && !job?.exited
+    const jobWorking = job?.state === 'working' && !job?.exited && !job?.blocked
+    const jobBlocked = !job?.exited && (job?.state === 'blocked' || Boolean(job?.blocked))
     const jobFinished =
       job?.exited || job?.state === 'done' || job?.state === 'failed' || job?.state === 'stopped'
     const liveFlag = Boolean(live) || jobWorking
@@ -2270,7 +2344,7 @@ export class SessionManager {
       live: liveFlag,
       pid: live?.pid ?? null,
       tmux: live?.tmux ?? null,
-      backgroundState: job?.state ?? null,
+      backgroundState: jobBlocked ? 'blocked' : (job?.state ?? null),
       needs: job?.needs ?? null,
       jobId: job?.jobId ?? null,
       unreadMessages: this.store.unreadCount(id),
@@ -2490,11 +2564,13 @@ export class SessionManager {
   ): string {
     if (status === 'waiting') {
       if (question) {
-        return question.answerable
-          ? 'Waiting for your answer'
-          : question.source === 'hook'
-            ? 'Question moved to the terminal'
-            : 'Answer this question in the terminal'
+        if (question.answerable) return 'Waiting for your answer'
+        // A background session has no terminal to fall back on, so the honest
+        // hint is the one that gets it moving again.
+        if (job) return 'Question expired — send a prompt to wake the session'
+        return question.source === 'hook'
+          ? 'Question moved to the terminal'
+          : 'Answer this question in the terminal'
       }
       if (notification) return notification.message
       if (job?.needs) return job.needs
