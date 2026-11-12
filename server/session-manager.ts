@@ -2573,7 +2573,11 @@ export class SessionManager {
           : 'Answer this question in the terminal'
       }
       if (notification) return notification.message
-      if (job?.needs) return job.needs
+      if (job?.needs) {
+        // A background session has no terminal of its own, so a permission
+        // prompt it waits at can only be answered by attaching to it.
+        return `${job.needs} — attach a terminal: claude attach ${shortId(job.jobId)}`
+      }
       if (live?.waitingFor) {
         return live.waitingFor === 'permission prompt'
           ? 'Permission prompt — answer in the terminal'
