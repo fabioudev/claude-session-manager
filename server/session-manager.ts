@@ -184,6 +184,12 @@ export interface SessionManagerOptions {
      * A wake started a copy under a new session id; ownership has to follow it.
      */
     sessionReplaced?: (from: string, to: string) => void
+    /**
+     * A background session finished its turn. Messages that arrived while it
+     * worked only sit in its inbox, and nothing wakes it again, so whoever
+     * queues to it gets a chance to deliver now.
+     */
+    sessionIdle?: (sessionId: string) => void
   }
 }
 
@@ -1968,6 +1974,7 @@ export class SessionManager {
 
     const overlaps = this.store.overlaps(2 * 60 * MINUTE, at)
     const next = new Map<string, SessionSummary>()
+    const wentIdle: string[] = []
     for (const id of ids) {
       const view = views.get(id) ?? null
       const live = liveBySession.get(id) ?? null
@@ -1978,6 +1985,17 @@ export class SessionManager {
       const summary = await this.buildSummary(id, view, live, job, runtime, at, overlaps)
       this.captureLaunchSpec(summary)
       next.set(id, summary)
+      // A background job that stopped working cannot pick up its inbox by
+      // itself. A blocked job is left alone: someone is expected at its dialog.
+      const previous = this.summaries.get(id)
+      if (
+        previous?.live &&
+        !summary.live &&
+        summary.kind === 'background' &&
+        summary.backgroundState !== 'blocked'
+      ) {
+        wentIdle.push(id)
+      }
     }
 
     const ordered = [...next.values()].sort((a, b) => {
@@ -1990,6 +2008,8 @@ export class SessionManager {
 
     this.summaries.clear()
     for (const summary of ordered) this.summaries.set(summary.id, summary)
+
+    for (const id of wentIdle) this.orchestration?.sessionIdle?.(id)
 
     for (const summary of ordered) {
       const previous = this.previousSerialized.get(summary.id)

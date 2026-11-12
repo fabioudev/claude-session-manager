@@ -206,6 +206,35 @@ describe('epics', () => {
     expect(reread?.messages.at(-1)?.deliveredAt).not.toBeNull()
   })
 
+  it('delivers a pending question when the busy background owner goes idle', async () => {
+    let mode: PromptResult['mode'] = 'queued'
+    const { service, deliveries } = await harness({
+      sendPrompt: async () =>
+        mode === 'typed'
+          ? { ok: true, mode: 'typed', note: 'Delivered.' }
+          : {
+              ok: true,
+              mode: 'queued',
+              note: 'The session is working; the prompt waits for its next turn.',
+            },
+    })
+    const epic = await service.createEpic(
+      { title: 'Busy', ownerSessionId: 'epic-owner' },
+      'commander',
+    )
+    const posted = await service.postEpicMessage(epic.id, { body: 'Status?' }, null)
+    expect(posted.messages.at(-1)?.deliveredAt).toBeNull()
+
+    deliveries.length = 0
+    mode = 'typed'
+    await service.sessionIdle('epic-owner')
+    expect(deliveries).toHaveLength(1)
+    expect(deliveries[0].id).toBe('epic-owner')
+    expect(deliveries[0].text).toContain('Status?')
+    const reread = service.snapshot().epics.find((item) => item.id === epic.id)
+    expect(reread?.messages.at(-1)?.deliveredAt).not.toBeNull()
+  })
+
   it('leaves a question pending when the epic has no commander and nudges the commander', async () => {
     const { service, deliveries } = await harness()
     const epic = await service.createEpic({ title: 'Unowned' }, null)

@@ -203,6 +203,7 @@ async function serve(config: AppConfig): Promise<void> {
       commanderSessionId: () => orchestration.snapshot().commanderSessionId,
       sessionEnded: (sessionId) => void orchestration.sessionEnded(sessionId),
       sessionReplaced: (from, to) => void orchestration.reassignSession(from, to),
+      sessionIdle: (sessionId) => void orchestration.sessionIdle(sessionId),
     },
   })
   await manager.init()

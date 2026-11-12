@@ -1225,6 +1225,37 @@ export class OrchestrationService {
     if (changed) await this.commit()
   }
 
+  /**
+   * An epic commander's background job finished its turn while a human message
+   * was still pending. A background session never reads its inbox on its own and
+   * nothing else wakes it, so the message is delivered now, exactly like a
+   * freshly written one.
+   */
+  async sessionIdle(sessionId: string): Promise<void> {
+    if (this.options.readOnly()) return
+    const epics = this.state.epics.filter(
+      (epic) =>
+        epic.ownerSessionId === sessionId && epic.status !== 'done' && epic.status !== 'cancelled',
+    )
+    let delivered = 0
+    for (const epic of epics) {
+      const pending = epic.messages.filter(
+        (message) => !message.authorSessionId && !message.deliveredAt,
+      )
+      for (const message of pending.slice(0, 3)) {
+        const result = await this.options
+          .sendPrompt(sessionId, this.epicMessagePrompt(epic, message))
+          .catch(() => null)
+        // Only a typed prompt means the message actually reached the session;
+        // otherwise it stays pending for the next attempt.
+        if (!result?.ok || result.mode !== 'typed') return
+        message.deliveredAt = this.now()
+        delivered += 1
+      }
+    }
+    if (delivered) await this.commit()
+  }
+
   async dispatchTask(id: string, actorSessionId: string | null): Promise<DelegatedTask> {
     this.writable()
     const task = this.task(id)
