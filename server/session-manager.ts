@@ -1607,10 +1607,29 @@ export class SessionManager {
     if (!(await sendEnter(pane))) {
       return { ok: false, error: 'Could not press Enter in the tmux pane.' }
     }
+    // A session with background work (a Claude Code scheduled task) answers
+    // /exit with a dialog instead of leaving: "Exit and stop tasks / Move to
+    // background / Stay". Nobody is at that terminal, and an unanswered dialog
+    // strands the session for good, so cancel it and say why we stopped.
+    let exitDialog = false
     const returned = await waitFor(async () => {
       const current = await paneInfo(pane)
-      return Boolean(current?.command && isShellCommand(current.command))
+      if (current?.command && isShellCommand(current.command)) return true
+      const text = await capturePane(pane, 20)
+      if (text && looksLikeTerminalDialog(text)) {
+        exitDialog = true
+        return true
+      }
+      return false
     }, RESTART_SHELL_TIMEOUT_MS)
+    if (exitDialog) {
+      await this.cancelExitDialog(pane)
+      return {
+        ok: false,
+        error:
+          'Claude Code asked whether to stop the session’s background work before exiting, so nothing was restarted and the dialog was cancelled. Restart it yourself if that work may be dropped.',
+      }
+    }
     if (!returned) {
       return {
         ok: false,
@@ -1671,6 +1690,18 @@ export class SessionManager {
       ok: true,
       output: `${detail ? `Restarted. ${detail}.` : 'Restarted the session.'}${droppedNote.trim()}`,
     }
+  }
+
+  /**
+   * Cancels the dialog Claude Code shows when /exit would drop background work.
+   * `3` is "Stay"; Enter only follows when the dialog is still on screen, so a
+   * stray Enter never lands in the session's prompt box.
+   */
+  private async cancelExitDialog(pane: string): Promise<void> {
+    if (!(await sendText(pane, '3'))) return
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const text = await capturePane(pane, 20)
+    if (text && looksLikeTerminalDialog(text)) await sendEnter(pane)
   }
 
   /**
@@ -1874,7 +1905,12 @@ export class SessionManager {
     this.lastAutoRestartAt = at
     void this.restartSession(target.id, { auto: true })
       .then((result) => {
-        if (!result.ok) this.restartCooldown.set(target.id, now() + RESTART_COOLDOWN_MS)
+        if (result.ok) return
+        this.restartCooldown.set(target.id, now() + RESTART_COOLDOWN_MS)
+        // A session that refused the restart (background work, a dialog) would
+        // be tried again on every cooldown; treat it like a finished attempt so
+        // the board does not keep interrupting it for the same version.
+        this.autoRestartHistory.set(target.id, { at: now(), signature })
       })
       .catch(() => {
         this.restartCooldown.set(target.id, now() + RESTART_COOLDOWN_MS)
