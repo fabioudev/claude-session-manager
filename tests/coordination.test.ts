@@ -25,6 +25,7 @@ function session(overrides: Partial<SessionSummary> & { id: string }): SessionSu
     kind: 'interactive',
     status: 'idle',
     statusDetail: 'Idle',
+    waitingFor: null,
     task: null,
     todos: [],
     activity: null,

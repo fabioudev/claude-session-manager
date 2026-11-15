@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   type DispatchInput,
   dispatchDecision,
+  looksLikeTerminalDialog,
   type WakeInput,
   wakeDecision,
 } from '../server/dispatch.js'
@@ -11,6 +12,7 @@ const base: DispatchInput = {
   session: makeSession({ id: 's', status: 'idle', live: true, tmux: 'dev1:@0.%0' }),
   working: false,
   hasQuestion: false,
+  waitingFor: null,
   supported: true,
   launchEnabled: true,
   readOnly: false,
@@ -19,6 +21,16 @@ const base: DispatchInput = {
 describe('dispatchDecision', () => {
   it('types into a live, idle session', () => {
     expect(dispatchDecision(base)).toEqual({ mode: 'typed', reason: null })
+  })
+
+  it('types into a session Claude Code reports as merely waiting at its prompt', () => {
+    // "waiting" used to mean "do not type" on its own, which stranded every
+    // prompt to an idle interactive session in an inbox nobody reads.
+    const decision = dispatchDecision({
+      ...base,
+      session: makeSession({ id: 's', status: 'waiting', live: true, tmux: 'dev1:@0.%0' }),
+    })
+    expect(decision).toEqual({ mode: 'typed', reason: null })
   })
 
   it('queues while the session is working', () => {
@@ -33,12 +45,10 @@ describe('dispatchDecision', () => {
     expect(decision.reason).toContain('question')
   })
 
-  it('queues for a session that is waiting at a terminal prompt', () => {
-    const decision = dispatchDecision({
-      ...base,
-      session: makeSession({ id: 's', status: 'waiting', live: true, tmux: 'dev1:@0.%0' }),
-    })
+  it('queues for a session at a dialog in its terminal', () => {
+    const decision = dispatchDecision({ ...base, waitingFor: 'dialog open' })
     expect(decision.mode).toBe('queued')
+    expect(decision.reason).toContain('dialog open')
   })
 
   it('queues for an ended session', () => {
@@ -54,6 +64,59 @@ describe('dispatchDecision', () => {
     expect(dispatchDecision({ ...base, readOnly: true }).mode).toBe('queued')
     expect(dispatchDecision({ ...base, launchEnabled: false }).mode).toBe('queued')
     expect(dispatchDecision({ ...base, supported: false }).mode).toBe('queued')
+  })
+})
+
+describe('looksLikeTerminalDialog', () => {
+  const inputBox = [
+    '✻ Crunched for 1m 10s · done 12:53 PM',
+    '',
+    '──────────────────────────────────────────────────────────────',
+    '❯ ',
+    '──────────────────────────────────────────────────────────────',
+    '  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← 30 agents',
+  ].join('\n')
+
+  it('leaves the idle input box alone', () => {
+    expect(looksLikeTerminalDialog(inputBox)).toBe(false)
+  })
+
+  it('recognises the "Background work is running" exit confirmation', () => {
+    const pane = [
+      inputBox,
+      '',
+      '   Background work is running',
+      '   The following will stop when you exit:',
+      '',
+      '   scheduled task · 7,27,47 * * * * · [Commander-Watchdog, alle 20 min]',
+      '',
+      '   ❯ 1. Exit and stop tasks',
+      '     2. Move to background and exit',
+      '     3. Stay',
+      '',
+      '   Enter to confirm · Esc to cancel',
+    ].join('\n')
+    expect(looksLikeTerminalDialog(pane)).toBe(true)
+  })
+
+  it('recognises a permission prompt without the footer', () => {
+    const pane = [
+      ' Bash command',
+      '   rm -rf ./build',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+    ].join('\n')
+    expect(looksLikeTerminalDialog(pane)).toBe(true)
+  })
+
+  it('ignores text from earlier in the scrollback', () => {
+    const pane = [
+      '   Enter to confirm · Esc to cancel',
+      ...Array.from({ length: 20 }, (_, index) => `line ${index}`),
+      inputBox,
+    ].join('\n')
+    expect(looksLikeTerminalDialog(pane)).toBe(false)
   })
 })
 

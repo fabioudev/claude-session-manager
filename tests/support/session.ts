@@ -20,6 +20,7 @@ export function makeSession(overrides: Partial<SessionSummary> = {}): SessionSum
     kind: 'interactive',
     status: 'idle',
     statusDetail: 'Ready for the next prompt',
+    waitingFor: null,
     task: null,
     todos: [],
     activity: null,

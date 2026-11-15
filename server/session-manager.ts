@@ -34,7 +34,7 @@ import type {
 } from '../shared/types.js'
 import type { AppConfig } from './config.js'
 import { buildInjectedContext, claimConflictNote, overlapNote } from './coordination.js'
-import { dispatchDecision, wakeDecision } from './dispatch.js'
+import { dispatchDecision, looksLikeTerminalDialog, wakeDecision } from './dispatch.js'
 import {
   makePreviewLink,
   normalizePreviewName,
@@ -77,6 +77,7 @@ import {
   sendEnter,
   sendText,
   sessionExists,
+  tmuxSessionOf,
 } from './tmux.js'
 import { describeToolCall, questionsFromToolInput } from './transcript/parse.js'
 import { TranscriptStore, type TranscriptView } from './transcript/store.js'
@@ -907,6 +908,7 @@ export class SessionManager {
       session,
       working: Boolean(this.runtimes.get(id)?.working),
       hasQuestion: Boolean(session.question),
+      waitingFor: session.waitingFor,
       supported: restartSupported(),
       launchEnabled: this.store.getSettings().launchEnabled,
       readOnly: this.config.readOnly,
@@ -930,6 +932,14 @@ export class SessionManager {
     const allowed = session.pid ? await processCommandNames(session.pid) : new Set<string>()
     if (!isExpectedForeground(current.command, allowed)) {
       return queue('Another program is in the foreground of this pane.')
+    }
+    // The registry can lag a dialog by a moment, and not every dialog is named
+    // there. The pane itself is the truth: typing into a menu would answer it.
+    const tail = await capturePane(pane, 18)
+    if (tail && looksLikeTerminalDialog(tail)) {
+      return queue(
+        'The session is at a dialog in its terminal; answer it there and send this again.',
+      )
     }
     if (!(await pasteText(pane, body)) || !(await sendEnter(pane))) {
       return queue('The text could not be typed into the pane.')
@@ -2345,6 +2355,7 @@ export class SessionManager {
       kind: live?.kind ?? (job ? 'background' : 'unknown'),
       status,
       statusDetail,
+      waitingFor: live?.waitingFor ?? null,
       task: task ? truncate(task, 2000) : null,
       todos: view?.todos ?? [],
       activity: currentActivity,
@@ -2590,16 +2601,23 @@ export class SessionManager {
           ? 'Question moved to the terminal'
           : 'Answer this question in the terminal'
       }
+      // Claude Code's own registry is the only place a dialog shows up; the
+      // notification that follows it ("Claude is waiting for your input") would
+      // make a session at an exit or permission dialog look ready for a prompt.
+      if (live?.waitingFor) {
+        if (live.waitingFor === 'permission prompt') {
+          return 'Permission prompt — answer in the terminal'
+        }
+        const tmux = tmuxSessionOf(live.tmux)
+        return tmux
+          ? `${live.waitingFor} — answer it in the terminal: tmux attach -t ${tmux}`
+          : `${live.waitingFor} — answer it in the terminal`
+      }
       if (notification) return notification.message
       if (job?.needs) {
         // A background session has no terminal of its own, so a permission
         // prompt it waits at can only be answered by attaching to it.
         return `${job.needs} — attach a terminal: claude attach ${shortId(job.jobId)}`
-      }
-      if (live?.waitingFor) {
-        return live.waitingFor === 'permission prompt'
-          ? 'Permission prompt — answer in the terminal'
-          : `Waiting for ${live.waitingFor}`
       }
       if (job?.detail) return job.detail
       return 'Waiting for input'

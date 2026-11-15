@@ -186,6 +186,12 @@ export interface SessionSummary {
   kind: SessionKind
   status: SessionStatus
   statusDetail: string
+  /**
+   * What Claude Code itself says the session waits for, straight from its
+   * registry ("dialog open", "permission prompt", …). Null when it sits at its
+   * input box. A dialog owns the keyboard, so a prompt must not be typed then.
+   */
+  waitingFor: string | null
   task: string | null
   todos: TodoItem[]
   activity: CurrentActivity | null

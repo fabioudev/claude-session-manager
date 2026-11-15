@@ -14,6 +14,11 @@ export interface DispatchInput {
   working: boolean
   /** The session is at a question the board can answer. */
   hasQuestion: boolean
+  /**
+   * What Claude Code itself reports the session waits for ("dialog open",
+   * "permission prompt", …). Any value means a dialog holds the keyboard.
+   */
+  waitingFor: string | null
   /** restart/resume machinery exists on this platform. */
   supported: boolean
   /** Launching sessions is allowed in the settings. */
@@ -37,10 +42,34 @@ export function dispatchDecision(input: DispatchInput): DispatchDecision {
   if (!input.session.tmux) return queued('This session has no tmux pane to type into.')
   if (input.hasQuestion) return queued('The session is answering a question right now.')
   if (input.working) return queued('The session is working; the prompt waits for its next turn.')
-  if (input.session.status === 'waiting') {
-    return queued('The session is waiting at a prompt in its terminal.')
+  // Claude Code's registry names what holds the keyboard. Typing a prompt into
+  // a dialog would answer that dialog instead (an exit confirmation would even
+  // end the session), so this is a hard stop, not a polite wait.
+  if (input.waitingFor) {
+    return queued(
+      `The session is at "${input.waitingFor}" in its terminal; answer it there and send this again.`,
+    )
   }
   return { mode: 'typed', reason: null }
+}
+
+const DIALOG_HINT =
+  /Enter to confirm|Esc to cancel|Do you want to (?:proceed|allow)|Tab to toggle|↑\/↓ to navigate|Press Enter to (?:continue|return)/i
+
+/**
+ * A dialog drawn into the pane, read from the bottom of the screen. The normal
+ * input box has no option list and no confirm/cancel footer, so this is safe
+ * against the idle prompt — while a trust prompt, a permission prompt or the
+ * "Background work is running" exit confirmation all match.
+ */
+export function looksLikeTerminalDialog(paneText: string): boolean {
+  const tail = paneText
+    .split('\n')
+    .filter((line) => line.trim())
+    .slice(-14)
+    .join('\n')
+  if (DIALOG_HINT.test(tail)) return true
+  return /^\s*❯\s*\d+\./m.test(tail) && /^\s*\d+\.\s/m.test(tail)
 }
 
 export interface WakeInput {

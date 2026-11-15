@@ -20,6 +20,13 @@ export function paneTarget(tmux: string | null): string | null {
   return match?.[1] ?? null
 }
 
+/** The tmux session name of a registry target (`csm-abc-2:@21.%21` → `csm-abc-2`). */
+export function tmuxSessionOf(tmux: string | null): string | null {
+  if (!tmux) return null
+  const name = tmux.trim().split(':')[0]
+  return name && !name.startsWith('%') ? name : null
+}
+
 async function query(args: string[]): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(TMUX_BIN, args, {
