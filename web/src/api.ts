@@ -12,6 +12,7 @@ import type {
   EpicMessageInput,
   EpicPatch,
   FileClaim,
+  HumanNotification,
   KnowledgeEntry,
   KnowledgeInput,
   KnowledgePatch,
@@ -214,6 +215,10 @@ export const api = {
       body: JSON.stringify(patch),
     }),
   commandCenter: () => request<CommandCenterSnapshot>('/command-center'),
+  dismissNotification: (id: string) =>
+    request<HumanNotification>(`/notifications/${encodeURIComponent(id)}/dismiss`, {
+      method: 'POST',
+    }),
   setCommander: (sessionId: string | null) =>
     request<CommandCenterSnapshot>('/commander', {
       method: 'PUT',

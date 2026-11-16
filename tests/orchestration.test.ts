@@ -823,9 +823,81 @@ describe('OrchestrationService knowledge and safety', () => {
       decisions: [],
       commands: [],
       updates: [],
+      notifications: [],
     })
     expect(
       (await readdir(dir)).some((name) => name.startsWith('command-center.json.corrupt-')),
     ).toBe(true)
+  })
+})
+
+describe('human notifications', () => {
+  it('lets any live session leave a note that stays until the human dismisses it', async () => {
+    const { service } = await harness()
+    const note = await service.notifyHuman(
+      { title: 'Admin-APK ist fertig', body: 'Bitte auf dem Gerät prüfen.', kind: 'done' },
+      'worker',
+    )
+    expect(note).toMatchObject({
+      kind: 'done',
+      authorSessionId: 'worker',
+      sessionId: 'worker',
+      dismissedAt: null,
+      title: 'Admin-APK ist fertig',
+    })
+    expect(service.snapshot().notifications.map((item) => item.id)).toContain(note.id)
+
+    // Dismissing is the human's job: the board sends no session header.
+    const dismissed = await service.dismissNotification(note.id, null)
+    expect(dismissed.dismissedAt).not.toBeNull()
+    expect(service.snapshot().notifications.some((item) => item.id === note.id)).toBe(false)
+  })
+
+  it('links a note to a task and keeps only real references', async () => {
+    const { service } = await harness()
+    const task = await assignedTask(service)
+    const note = await service.notifyHuman(
+      { title: 'Zur Abnahme', taskId: task.id, kind: 'attention' },
+      'worker',
+    )
+    expect(note.taskId).toBe(task.id)
+
+    await expect(
+      service.notifyHuman({ title: 'Geistertask', taskId: 'task_missing' }, 'worker'),
+    ).rejects.toMatchObject({ code: 'not_found' })
+    await expect(
+      service.notifyHuman({ title: 'Unbekannt', kind: 'urgent' as never }, 'worker'),
+    ).rejects.toMatchObject({ code: 'bad_request' })
+    await expect(service.notifyHuman({ title: 'Von wem?' }, 'ghost')).rejects.toMatchObject({
+      code: 'not_found',
+    })
+  })
+
+  it('refuses to let a session dismiss its own note', async () => {
+    const { service } = await harness()
+    const note = await service.notifyHuman({ title: 'Bitte helfen', kind: 'help' }, 'worker')
+    await expect(service.dismissNotification(note.id, 'worker')).rejects.toMatchObject({
+      code: 'forbidden',
+    })
+    expect(service.snapshot().notifications).toHaveLength(1)
+  })
+
+  it('survives a reload and leaves dismissed notes out of the snapshot', async () => {
+    const { dir, service } = await harness()
+    const open = await service.notifyHuman({ title: 'Bleibt offen' }, 'worker')
+    const gone = await service.notifyHuman({ title: 'Schon erledigt' }, 'worker')
+    await service.dismissNotification(gone.id, null)
+
+    const reloaded = new OrchestrationService({
+      dataDir: dir,
+      readOnly: () => false,
+      getSession: () => null,
+      sendPrompt: vi.fn(),
+      onChange: vi.fn(),
+    })
+    await reloaded.init()
+    const ids = reloaded.snapshot().notifications.map((item) => item.id)
+    expect(ids).toContain(open.id)
+    expect(ids).not.toContain(gone.id)
   })
 })

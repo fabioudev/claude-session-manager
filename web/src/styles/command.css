@@ -477,6 +477,105 @@
   line-height: 1.45;
 }
 
+.command-notifications {
+  margin-top: 26px;
+}
+
+.notification-list {
+  display: grid;
+  gap: 10px;
+}
+
+.notification-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 13px;
+  padding: 15px 17px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.notification-card.is-done {
+  border-left-color: var(--success);
+}
+
+.notification-card.is-help {
+  border-left-color: var(--accent);
+}
+
+.notification-mark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--ink-2);
+}
+
+.notification-card.is-done .notification-mark {
+  color: var(--success);
+}
+
+.notification-card.is-help .notification-mark {
+  color: var(--accent);
+}
+
+.notification-main header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.notification-main header strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 580;
+}
+
+.notification-main header span {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.notification-text {
+  margin-top: 5px;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.notification-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 13px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+
+.notification-links a,
+.notification-links button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+}
+
+.notification-links a:hover,
+.notification-links button:hover {
+  text-decoration: underline;
+}
+
+.notification-dismiss {
+  white-space: nowrap;
+}
+
 .task-pipeline {
   display: grid;
   grid-template-columns: repeat(5, minmax(185px, 1fr));
@@ -1741,6 +1840,15 @@
   }
 
   .offline-task .btn {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .notification-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .notification-dismiss {
     grid-column: 2;
     justify-self: start;
   }

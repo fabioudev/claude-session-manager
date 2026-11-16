@@ -44,6 +44,7 @@ const EMPTY_COMMAND_CENTER: CommandCenterSnapshot = {
   decisions: [],
   commands: [],
   updates: [],
+  notifications: [],
 }
 
 const LiveContext = createContext<LiveContextValue | null>(null)

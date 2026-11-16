@@ -20,6 +20,9 @@ import type {
   EpicMessageKind,
   EpicPatch,
   EpicStatus,
+  HumanNotification,
+  HumanNotificationInput,
+  HumanNotificationKind,
   KnowledgeEntry,
   KnowledgeInput,
   KnowledgePatch,
@@ -47,6 +50,9 @@ const MAX_KNOWLEDGE = 500
 const MAX_DECISIONS = 500
 const MAX_COMMANDS = 100
 const MAX_UPDATES = 200
+const MAX_NOTIFICATIONS = 200
+/** How many open notes the snapshot carries; the page shows the newest. */
+const MAX_OPEN_NOTIFICATIONS = 60
 const MAX_ACTIVITIES = 80
 const MAX_CONTEXT = 18_000
 const MAX_TASK_KNOWLEDGE = 5_000
@@ -94,6 +100,7 @@ function emptyState(): PersistedCommandCenter {
     decisions: [],
     commands: [],
     updates: [],
+    notifications: [],
   }
 }
 
@@ -104,6 +111,10 @@ const EPIC_STATUSES: ReadonlySet<EpicStatus> = new Set<EpicStatus>([
   'done',
   'cancelled',
 ])
+
+const HUMAN_NOTIFICATION_KINDS: ReadonlySet<HumanNotificationKind> = new Set<HumanNotificationKind>(
+  ['done', 'attention', 'help'],
+)
 
 const EPIC_MESSAGE_KINDS: ReadonlySet<EpicMessageKind> = new Set<EpicMessageKind>([
   'question',
@@ -203,6 +214,27 @@ function sanitizeState(value: unknown): PersistedCommandCenter {
           epicId: typeof update.epicId === 'string' ? update.epicId : null,
         }))
       : [],
+    notifications: Array.isArray(input.notifications)
+      ? (input.notifications as HumanNotification[]).map(sanitizeNotification)
+      : [],
+  }
+}
+
+function sanitizeNotification(value: HumanNotification): HumanNotification {
+  const kind =
+    value && HUMAN_NOTIFICATION_KINDS.has(value.kind) ? value.kind : ('attention' as const)
+  return {
+    id: typeof value.id === 'string' ? value.id : `note_${randomUUID()}`,
+    at: typeof value.at === 'number' ? value.at : Date.now(),
+    authorSessionId: typeof value.authorSessionId === 'string' ? value.authorSessionId : null,
+    kind,
+    title: typeof value.title === 'string' ? value.title : 'Note',
+    body: typeof value.body === 'string' ? value.body : '',
+    sessionId: typeof value.sessionId === 'string' ? value.sessionId : null,
+    taskId: typeof value.taskId === 'string' ? value.taskId : null,
+    epicId: typeof value.epicId === 'string' ? value.epicId : null,
+    previewUrl: typeof value.previewUrl === 'string' ? value.previewUrl : null,
+    dismissedAt: typeof value.dismissedAt === 'number' ? value.dismissedAt : null,
   }
 }
 
@@ -274,6 +306,12 @@ export class OrchestrationService {
       decisions: [...this.state.decisions].sort((a, b) => b.createdAt - a.createdAt),
       commands: [...this.state.commands].sort((a, b) => b.createdAt - a.createdAt),
       updates: [...this.state.updates].sort((a, b) => b.at - a.at),
+      // Only open notes travel to the board; the dismissed ones stay in the file
+      // as a short history but would only bloat every snapshot.
+      notifications: this.state.notifications
+        .filter((note) => !note.dismissedAt)
+        .sort((a, b) => b.at - a.at)
+        .slice(0, MAX_OPEN_NOTIFICATIONS),
     }
   }
 
@@ -482,6 +520,56 @@ export class OrchestrationService {
     }
     await this.commit()
     return update
+  }
+
+  /**
+   * A session leaves the human a durable note: "finished — please look", "this
+   * preview is ready", "I need you". Any session may write one, unlike the
+   * commander-only channel report. It stays on the command center page until
+   * the human dismisses it — across turns, session ends and daemon restarts.
+   */
+  async notifyHuman(
+    input: HumanNotificationInput,
+    actorSessionId: string | null,
+  ): Promise<HumanNotification> {
+    this.writable()
+    if (actorSessionId) this.liveSession(actorSessionId, 'Session')
+    if (input.kind !== undefined && !HUMAN_NOTIFICATION_KINDS.has(input.kind)) {
+      throw new OrchestrationError(400, 'bad_request', 'Unknown notification kind.')
+    }
+    const note: HumanNotification = {
+      id: `note_${randomUUID()}`,
+      at: this.now(),
+      authorSessionId: actorSessionId,
+      kind: input.kind ?? 'attention',
+      title: requiredText(input.title, 'Notification title', 180),
+      body: optionalText(input.body, 'Notification body', 4000) ?? '',
+      sessionId: input.sessionId?.trim() || actorSessionId,
+      taskId: input.taskId ? this.task(input.taskId).id : null,
+      epicId: input.epicId ? this.epic(input.epicId).id : null,
+      previewUrl: input.previewUrl ? this.previewUrl(input.previewUrl) : null,
+      dismissedAt: null,
+    }
+    this.state.notifications.push(note)
+    this.trimNotifications()
+    await this.commit()
+    return note
+  }
+
+  /**
+   * Only the human dismisses a note — a session that removed its own would look
+   * like it never asked. The board sends no session header for this.
+   */
+  async dismissNotification(id: string, actorSessionId: string | null): Promise<HumanNotification> {
+    this.writable()
+    if (actorSessionId) {
+      throw new OrchestrationError(403, 'forbidden', 'Only the human can dismiss a notification.')
+    }
+    const note = this.state.notifications.find((candidate) => candidate.id === id)
+    if (!note) throw new OrchestrationError(404, 'not_found', 'Unknown notification.')
+    if (!note.dismissedAt) note.dismissedAt = this.now()
+    await this.commit()
+    return note
   }
 
   /**
@@ -719,6 +807,21 @@ export class OrchestrationService {
     if (this.state.updates.length > MAX_UPDATES) {
       this.state.updates.splice(0, this.state.updates.length - MAX_UPDATES)
     }
+  }
+
+  /** Dismissed notes are dropped first; an open note only goes when nothing else is left. */
+  private trimNotifications(): void {
+    const overflow = this.state.notifications.length - MAX_NOTIFICATIONS
+    if (overflow <= 0) return
+    const drop = new Set(
+      [...this.state.notifications]
+        .sort(
+          (a, b) => Number(Boolean(b.dismissedAt)) - Number(Boolean(a.dismissedAt)) || a.at - b.at,
+        )
+        .slice(0, overflow)
+        .map((note) => note.id),
+    )
+    this.state.notifications = this.state.notifications.filter((note) => !drop.has(note.id))
   }
 
   /** Ledger events worth surfacing in the channel without asking the commander. */

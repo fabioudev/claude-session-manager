@@ -5,6 +5,7 @@ import type {
   CommanderUpdateKind,
   DecisionRequest,
   DelegatedTask,
+  HumanNotification,
   KnowledgeEntry,
   PublicConfig,
   SessionSummary,
@@ -18,7 +19,9 @@ import {
   CircleAlert,
   Clock3,
   Command,
+  Eye,
   History,
+  LifeBuoy,
   ListPlus,
   LoaderCircle,
   MessageCircle,
@@ -1088,13 +1091,79 @@ function KnowledgeCard({ entry, readOnly }: { entry: KnowledgeEntry; readOnly: b
   )
 }
 
+function NotificationCard({
+  note,
+  sessions,
+  onOpenTask,
+  onDismiss,
+  dismissing,
+}: {
+  note: HumanNotification
+  sessions: SessionSummary[]
+  onOpenTask: (id: string) => void
+  onDismiss: (id: string) => void
+  dismissing: boolean
+}) {
+  const author = sessions.find((session) => session.id === note.authorSessionId) ?? null
+  const taskId = note.taskId
+  const epicId = note.epicId
+  const Icon = note.kind === 'done' ? Check : note.kind === 'help' ? LifeBuoy : Eye
+  return (
+    <article className={`notification-card is-${note.kind}`}>
+      <span className="notification-mark" aria-hidden="true">
+        <Icon size={16} />
+      </span>
+      <div className="notification-main">
+        <header>
+          <strong>{note.title}</strong>
+          <span>
+            {author ? sessionLabel(author) : 'Session'} · {relativeTime(note.at)}
+          </span>
+        </header>
+        {note.body ? <Markdown text={note.body} className="notification-text" /> : null}
+        {author || taskId || epicId || note.previewUrl ? (
+          <div className="notification-links">
+            {author ? <Link to={`/sessions/${encodeURIComponent(author.id)}`}>Session</Link> : null}
+            {taskId ? (
+              <button type="button" onClick={() => onOpenTask(taskId)}>
+                Task
+              </button>
+            ) : null}
+            {epicId ? <Link to={`/epics/${encodeURIComponent(epicId)}`}>Epic</Link> : null}
+            {note.previewUrl ? (
+              <a href={note.previewUrl} target="_blank" rel="noreferrer">
+                Open preview
+              </a>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        className="btn btn-sm notification-dismiss"
+        onClick={() => onDismiss(note.id)}
+        disabled={dismissing}
+      >
+        {dismissing ? (
+          <LoaderCircle size={14} className="spin" aria-hidden="true" />
+        ) : (
+          <Check size={14} aria-hidden="true" />
+        )}
+        Done
+      </button>
+    </article>
+  )
+}
+
 export function CommandPage() {
   const { sessions, questions, commandCenter, config } = useLive()
+  const { notify } = useToast()
   const [showTaskForm, setShowTaskForm] = useState(false)
   const [showKnowledgeForm, setShowKnowledgeForm] = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [showDone, setShowDone] = useState(true)
   const [knowledgeQuery, setKnowledgeQuery] = useState('')
+  const [dismissingNote, setDismissingNote] = useState<string | null>(null)
   const stats = useMemo(() => commandStats(commandCenter), [commandCenter])
   const columns = useMemo(
     () => taskColumns(commandCenter.tasks, showDone),
@@ -1106,9 +1175,21 @@ export function CommandPage() {
   const selectedTask = commandCenter.tasks.find((task) => task.id === selectedTaskId) ?? null
   const openQuestions = visibleQuestions(questions, sessions)
   const needsCount = openDecisions.length + openQuestions.length + offline.length
+  const notifications = commandCenter.notifications
   const activeTasks = commandCenter.tasks.filter(
     (task) => task.status !== 'done' && task.status !== 'cancelled',
   )
+
+  async function dismissNote(id: string) {
+    setDismissingNote(id)
+    try {
+      await api.dismissNotification(id)
+    } catch (cause) {
+      notify(errorText(cause, 'The note could not be dismissed.'), 'error')
+    } finally {
+      setDismissingNote(null)
+    }
+  }
 
   return (
     <div className="command-page">
@@ -1158,6 +1239,30 @@ export function CommandPage() {
       </section>
 
       <FeaturesInFlight tasks={commandCenter.tasks} onOpenTask={setSelectedTaskId} />
+
+      {notifications.length ? (
+        <section className="command-notifications" aria-labelledby="command-notifications-title">
+          <div className="command-section-head">
+            <div>
+              <h2 id="command-notifications-title">From your sessions</h2>
+              <p>Notes they left for you. They stay until you press Done.</p>
+            </div>
+            <span className="attention-count">{notifications.length}</span>
+          </div>
+          <div className="notification-list">
+            {notifications.map((note) => (
+              <NotificationCard
+                key={note.id}
+                note={note}
+                sessions={sessions}
+                onOpenTask={setSelectedTaskId}
+                onDismiss={(noteId) => void dismissNote(noteId)}
+                dismissing={dismissingNote === note.id}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="command-needs" aria-labelledby="command-needs-title">
         <div className="command-section-head">

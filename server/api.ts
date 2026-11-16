@@ -22,6 +22,7 @@ import type {
   EpicPatch,
   EpicStatus,
   HookEnvelope,
+  HumanNotificationInput,
   KnowledgeInput,
   KnowledgePatch,
   LaunchSessionInput,
@@ -675,6 +676,35 @@ export async function buildServer(
             sessionHeader(request),
           ),
         ),
+    )
+  })
+
+  app.post('/api/notifications', async (request, reply) => {
+    const body = asObject(request.body)
+    if (!body || typeof body.title !== 'string') {
+      return sendError(reply, 400, 'bad_request', 'Expected { title } for the notification.')
+    }
+    for (const key of ['body', 'sessionId', 'taskId', 'epicId', 'previewUrl', 'kind']) {
+      if (body[key] !== undefined && typeof body[key] !== 'string') {
+        return sendError(reply, 400, 'bad_request', `${key} must be a string.`)
+      }
+    }
+    return orchestrate(reply, async () =>
+      reply
+        .code(201)
+        .send(
+          await orchestration.notifyHuman(
+            body as unknown as HumanNotificationInput,
+            sessionHeader(request),
+          ),
+        ),
+    )
+  })
+
+  app.post('/api/notifications/:id/dismiss', async (request, reply) => {
+    const { id } = request.params as { id: string }
+    return orchestrate(reply, async () =>
+      orchestration.dismissNotification(id, sessionHeader(request)),
     )
   })
 

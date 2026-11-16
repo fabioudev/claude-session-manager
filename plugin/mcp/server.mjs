@@ -674,6 +674,24 @@ async function reportStatus(args) {
   return `Reported "${update.title}" (${update.kind}) in the command center channel.`
 }
 
+async function notifyHuman(args) {
+  const identity = requireIdentity()
+  const note = await api('/api/notifications', {
+    method: 'POST',
+    sessionId: identity.sessionId,
+    body: {
+      kind: args?.kind,
+      title: args?.title,
+      body: args?.body,
+      sessionId: args?.session_id,
+      taskId: args?.task_id,
+      epicId: args?.epic_id,
+      previewUrl: args?.preview_url,
+    },
+  })
+  return `Note "${note.title}" (${note.kind}) is on the command center page for the human; it stays until they press Done.`
+}
+
 async function dispatchTask(args) {
   const identity = requireIdentity()
   const task = await api(`/api/tasks/${encodeURIComponent(args?.task_id || '')}/dispatch`, {
@@ -1076,6 +1094,25 @@ const TOOLS = [
     },
   },
   {
+    name: 'notify_human',
+    description:
+      'Leave the human a durable note on the command center page. It stays there until they press Done — use it when something is finished and should be looked at, when a preview or result is ready, or when you need their help. Routine progress belongs in report_status; questions that block work belong in request_decision.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'One line the human reads first, e.g. "Admin-APK v1.0.190 ist fertig".' },
+        body: { type: 'string', description: 'One or two sentences: what to look at, where, and what you need. Markdown allowed. Never write credentials.' },
+        kind: { type: 'string', enum: ['done', 'attention', 'help'], description: 'done = finished and ready to look at; attention = please review; help = I am blocked without you.' },
+        session_id: { type: 'string', description: 'Session to link; defaults to yours.' },
+        task_id: { type: 'string', description: 'Task this note is about.' },
+        epic_id: { type: 'string', description: 'Epic this note is about.' },
+        preview_url: { type: 'string', description: 'Preview the human should open.' },
+      },
+      required: ['title'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'dispatch_task',
     description: 'Assignee or commander: deliver or retry delivery of an open task to its assigned live session.',
     inputSchema: {
@@ -1163,6 +1200,7 @@ const HANDLERS = {
   create_task: createTask,
   update_task: updateTask,
   report_status: reportStatus,
+  notify_human: notifyHuman,
   dispatch_task: dispatchTask,
   spawn_task: spawnTask,
   create_epic: createEpic,
@@ -1181,6 +1219,8 @@ Use list_sessions to see your peers. Before editing files, call shared_changes a
 The command center has durable tasks, knowledge and human decisions. The commander uses create_task to delegate; assigned workers report explicit progress with update_task, finish in review, and call request_decision when blocked on the human. There is no session budget: when no live idle worker can take a task, the commander calls spawn_task to start a new session for it instead of leaving work queued. As commander, call report_status immediately after delegating (which agents run what, in which project) and again on milestones, blockers and completions — the human reads that channel instead of polling. Use get_command_center and list_knowledge for the current shared state.
 
 Large goals are epics. When the human hands over a bigger task, attach it to a fitting epic or open one with create_epic, and hand it to a dedicated session with spawn_epic_commander; every task then carries the epic_id. The epic status_line (update_epic) is what the human reads on the overview — one or two short sentences, kept current. Human questions and remarks about an epic arrive in the epic thread; answer there with post_epic_message instead of the main chat.
+
+Use notify_human for the few things the human must see themselves — a result that is finished and ready to look at, a preview to open, or a point where you are blocked without them. Such a note stays on the command center page until the human presses Done; keep it to a headline and one or two sentences, and never put credentials in it.
 
 The human can answer your AskUserQuestion prompts from the web UI. When that happens, the tool call is denied with the answers in its reason; continue the task using those answers instead of asking again.`
 

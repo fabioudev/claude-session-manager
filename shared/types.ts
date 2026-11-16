@@ -649,6 +649,40 @@ export interface CommanderUpdateInput {
   taskIds?: string[]
 }
 
+export type HumanNotificationKind = 'done' | 'attention' | 'help'
+
+/**
+ * A durable note a session leaves for the human. Unlike a channel report it does
+ * not scroll away: it stays on the command center page until the human dismisses
+ * it, across turns, session ends and daemon restarts.
+ */
+export interface HumanNotification {
+  id: string
+  at: number
+  /** The session that left it; null for a system line. */
+  authorSessionId: string | null
+  kind: HumanNotificationKind
+  title: string
+  body: string
+  /** Optional jump targets; null when the note is not about one of them. */
+  sessionId: string | null
+  taskId: string | null
+  epicId: string | null
+  previewUrl: string | null
+  /** Set once the human clicked "Done"; such entries leave the snapshot. */
+  dismissedAt: number | null
+}
+
+export interface HumanNotificationInput {
+  kind?: HumanNotificationKind
+  title: string
+  body?: string
+  sessionId?: string | null
+  taskId?: string | null
+  epicId?: string | null
+  previewUrl?: string | null
+}
+
 export interface CommandCenterSnapshot {
   commanderSessionId: string | null
   tasks: DelegatedTask[]
@@ -657,6 +691,8 @@ export interface CommandCenterSnapshot {
   decisions: DecisionRequest[]
   commands: CommanderCommand[]
   updates: CommanderUpdate[]
+  /** Open notes from sessions, newest first; dismissed ones are left out. */
+  notifications: HumanNotification[]
 }
 
 export interface CommandReceipt extends PromptResult {

@@ -39,7 +39,11 @@ export function AppShell() {
   const buckets = boardBuckets(sessions)
   const durableNeeds = commandCenter.decisions.filter((decision) => !decision.resolvedAt).length
   const offlineCount = offlineAssignments(commandCenter.tasks, sessions).length
-  const commandNeeds = visibleQuestions(questions, sessions).length + durableNeeds + offlineCount
+  const commandNeeds =
+    visibleQuestions(questions, sessions).length +
+    durableNeeds +
+    offlineCount +
+    commandCenter.notifications.length
   const commandActive = commandCenter.tasks.filter(
     (task) => task.status !== 'done' && task.status !== 'cancelled',
   ).length
