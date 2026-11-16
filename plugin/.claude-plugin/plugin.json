@@ -1,6 +1,6 @@
 {
   "name": "csm",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Live board and coordination tools for parallel Claude Code sessions: report work in progress, answer AskUserQuestion from the browser, message other sessions, and keep large goals in epics with a status line and their own thread.",
   "author": {
     "name": "Fabio Mende",
