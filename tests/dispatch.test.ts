@@ -3,6 +3,7 @@ import {
   type DispatchInput,
   dispatchDecision,
   looksLikeTerminalDialog,
+  selfApprovesTool,
   type WakeInput,
   wakeDecision,
 } from '../server/dispatch.js'
@@ -220,5 +221,16 @@ describe('wakeDecision', () => {
     expect(wakeDecision({ ...background, readOnly: true }).wake).toBe(false)
     expect(wakeDecision({ ...background, launchEnabled: false }).wake).toBe(false)
     expect(wakeDecision({ ...background, supported: false }).wake).toBe(false)
+  })
+})
+
+describe('selfApprovesTool', () => {
+  it('answers worktree switches itself and keeps every other prompt', () => {
+    expect(selfApprovesTool('EnterWorktree')).toBe(true)
+    expect(selfApprovesTool('ExitWorktree')).toBe(true)
+    expect(selfApprovesTool('Bash')).toBe(false)
+    expect(selfApprovesTool('Edit')).toBe(false)
+    expect(selfApprovesTool('AskUserQuestion')).toBe(false)
+    expect(selfApprovesTool(null)).toBe(false)
   })
 })

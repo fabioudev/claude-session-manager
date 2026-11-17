@@ -57,6 +57,19 @@ const DIALOG_HINT =
   /Enter to confirm|Esc to cancel|Do you want to (?:proceed|allow)|Tab to toggle|↑\/↓ to navigate|Press Enter to (?:continue|return)/i
 
 /**
+ * Tools the manager answers itself instead of leaving them at Claude Code's
+ * permission prompt. A background session has no terminal, so such a prompt
+ * would hold it forever; switching worktrees is reversible (ExitWorktree) and
+ * is how these workers isolate their branch, so asking the human adds nothing.
+ * Everything else keeps its prompt.
+ */
+const SELF_APPROVED_TOOLS: ReadonlySet<string> = new Set(['EnterWorktree', 'ExitWorktree'])
+
+export function selfApprovesTool(toolName: string | null | undefined): boolean {
+  return typeof toolName === 'string' && SELF_APPROVED_TOOLS.has(toolName)
+}
+
+/**
  * A dialog drawn into the pane, read from the bottom of the screen. The normal
  * input box has no option list and no confirm/cancel footer, so this is safe
  * against the idle prompt — while a trust prompt, a permission prompt or the

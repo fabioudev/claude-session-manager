@@ -34,7 +34,12 @@ import type {
 } from '../shared/types.js'
 import type { AppConfig } from './config.js'
 import { buildInjectedContext, claimConflictNote, overlapNote } from './coordination.js'
-import { dispatchDecision, looksLikeTerminalDialog, wakeDecision } from './dispatch.js'
+import {
+  dispatchDecision,
+  looksLikeTerminalDialog,
+  selfApprovesTool,
+  wakeDecision,
+} from './dispatch.js'
 import {
   makePreviewLink,
   normalizePreviewName,
@@ -685,6 +690,32 @@ export class SessionManager {
 
         if (envelope.toolName === 'AskUserQuestion') {
           return this.bridgeQuestion(sessionId, runtime, envelope.toolInput, clientAt)
+        }
+        // A background session cannot answer a permission prompt — it would sit
+        // there until a human attaches. Worktree switches are self-approved so
+        // the worker keeps moving; every other tool still asks.
+        if (selfApprovesTool(envelope.toolName)) {
+          const input = envelope.toolInput as { name?: unknown } | null
+          const name = typeof input?.name === 'string' ? oneLine(input.name, 120) : null
+          this.store.recordActivities(sessionId, [
+            {
+              id: `allow:${randomUUID()}`,
+              at: clientAt,
+              kind: 'status',
+              title: `Allowed ${envelope.toolName} without a prompt`,
+              detail: name ? `Worktree: ${name}` : undefined,
+            },
+          ])
+          return {
+            output: {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'allow',
+                permissionDecisionReason:
+                  'The Claude Session Manager approves worktree switches for sessions without a terminal.',
+              },
+            },
+          }
         }
         return { output: null }
       }
