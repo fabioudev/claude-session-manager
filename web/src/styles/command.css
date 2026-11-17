@@ -477,10 +477,6 @@
   line-height: 1.45;
 }
 
-.command-notifications {
-  margin-top: 26px;
-}
-
 .notification-list {
   display: grid;
   gap: 10px;

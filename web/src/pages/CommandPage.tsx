@@ -1208,6 +1208,30 @@ export function CommandPage() {
         </div>
       </section>
 
+      {notifications.length ? (
+        <section className="command-notifications" aria-labelledby="command-notifications-title">
+          <div className="command-section-head">
+            <div>
+              <h2 id="command-notifications-title">From your sessions</h2>
+              <p>Notes they left for you. They stay until you press Done.</p>
+            </div>
+            <span className="attention-count">{notifications.length}</span>
+          </div>
+          <div className="notification-list">
+            {notifications.map((note) => (
+              <NotificationCard
+                key={note.id}
+                note={note}
+                sessions={sessions}
+                onOpenTask={setSelectedTaskId}
+                onDismiss={(noteId) => void dismissNote(noteId)}
+                dismissing={dismissingNote === note.id}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       <CommanderPanel
         commandCenter={commandCenter}
         sessions={sessions}
@@ -1239,30 +1263,6 @@ export function CommandPage() {
       </section>
 
       <FeaturesInFlight tasks={commandCenter.tasks} onOpenTask={setSelectedTaskId} />
-
-      {notifications.length ? (
-        <section className="command-notifications" aria-labelledby="command-notifications-title">
-          <div className="command-section-head">
-            <div>
-              <h2 id="command-notifications-title">From your sessions</h2>
-              <p>Notes they left for you. They stay until you press Done.</p>
-            </div>
-            <span className="attention-count">{notifications.length}</span>
-          </div>
-          <div className="notification-list">
-            {notifications.map((note) => (
-              <NotificationCard
-                key={note.id}
-                note={note}
-                sessions={sessions}
-                onOpenTask={setSelectedTaskId}
-                onDismiss={(noteId) => void dismissNote(noteId)}
-                dismissing={dismissingNote === note.id}
-              />
-            ))}
-          </div>
-        </section>
-      ) : null}
 
       <section className="command-needs" aria-labelledby="command-needs-title">
         <div className="command-section-head">
