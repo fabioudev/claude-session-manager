@@ -80,6 +80,7 @@ import {
   pasteText,
   resumeSessionName,
   sendEnter,
+  sendKey,
   sendText,
   sessionExists,
   tmuxSessionOf,
@@ -851,14 +852,98 @@ export class SessionManager {
     return result
   }
 
-  answerQuestion(id: string, input: QuestionAnswerInput): { ok: boolean; error?: string } {
+  async answerQuestion(
+    id: string,
+    input: QuestionAnswerInput,
+  ): Promise<{ ok: boolean; error?: string }> {
     if (this.config.readOnly) return { ok: false, error: 'read-only mode' }
     if (this.store.getSettings().questionMode === 'terminal') {
       return { ok: false, error: 'questions are answered in the terminal' }
     }
     const result = this.broker.answer(id, input)
-    if (!result.ok) return { ok: false, error: result.error }
-    this.scheduleRecompute(0)
+    if (result.ok) {
+      this.scheduleRecompute(0)
+      return { ok: true }
+    }
+    // No hook holds this one (the daemon restarted, or the hook timed out while
+    // the dialog stayed on screen). Type the answer into the session's terminal.
+    const session = [...this.summaries.values()].find((candidate) => candidate.question?.id === id)
+    const question = session?.question
+    if (!session || !question || !question.paneAnswerable) {
+      return { ok: false, error: result.error }
+    }
+    const typed = await this.answerQuestionInPane(session, question, input)
+    if (typed.ok) {
+      this.suppressedQuestions.set(id, now())
+      this.scheduleRecompute(0)
+    }
+    return typed
+  }
+
+  /**
+   * Answers a dialog that only exists in the terminal: digits toggle the
+   * options of a multi-select list, arrows plus Enter pick one option in a
+   * single-select list, and the multi-select list needs a confirming Enter for
+   * "Submit answers". Everything is checked against the screen first, so a
+   * different dialog is never touched.
+   */
+  private async answerQuestionInPane(
+    session: SessionSummary,
+    question: PendingQuestion,
+    input: QuestionAnswerInput,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const pane = paneTarget(session.tmux)
+    if (!pane) return { ok: false, error: 'The question is not in a terminal pane.' }
+    const text = await capturePane(pane, 40)
+    if (!text || !looksLikeTerminalDialog(text)) {
+      return { ok: false, error: 'The question is no longer on screen.' }
+    }
+    const needle = oneLine(question.prompts[0]?.question ?? '', 24)
+    if (needle && !text.includes(needle)) {
+      return { ok: false, error: 'A different prompt is on screen now; answer it in the terminal.' }
+    }
+    const indexes = input.answers
+      .map((answer) => answer.index)
+      .filter((index) => Number.isInteger(index) && index >= 0)
+    if (!indexes.length) return { ok: false, error: 'Choose at least one answer.' }
+    const options = question.prompts[0]?.options.length ?? 0
+    const multi = /\[\s*[✔xX]?\]/.test(text)
+
+    if (multi) {
+      for (const index of indexes) {
+        if (!(await sendText(pane, String(index + 1)))) {
+          return { ok: false, error: 'Could not type into the terminal.' }
+        }
+      }
+      // The list is one row per option plus a Submit row; exact steps keep the
+      // focus on Submit (overshooting would wrap back onto an option).
+      for (let step = 0; step < options; step += 1) await sendKey(pane, 'Down')
+      if (!(await sendEnter(pane))) return { ok: false, error: 'Could not submit.' }
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const confirm = (await capturePane(pane, 12)) ?? ''
+      if (/Submit answers/i.test(confirm) && !(await sendEnter(pane))) {
+        return { ok: false, error: 'Could not confirm the answer.' }
+      }
+    } else {
+      const target = indexes[0] ?? 0
+      for (let step = 0; step < target; step += 1) await sendKey(pane, 'Down')
+      if (!(await sendEnter(pane))) return { ok: false, error: 'Could not submit.' }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    const after = (await capturePane(pane, 30)) ?? ''
+    if (needle && after.includes(needle) && looksLikeTerminalDialog(after)) {
+      return { ok: false, error: 'The dialog is still open; answer it in the terminal.' }
+    }
+    this.store.recordActivities(session.id, [
+      {
+        id: `answer:${randomUUID()}`,
+        at: now(),
+        kind: 'status',
+        title: 'Answered a terminal question from the board',
+        detail: oneLine(question.prompts[0]?.question ?? '', 160),
+      },
+    ])
     return { ok: true }
   }
 
@@ -2372,7 +2457,18 @@ export class SessionManager {
       transcriptQuestion && !this.isSuppressed(id, transcriptQuestion) ? transcriptQuestion : null
     const questionBase = brokerQuestion ?? visibleTranscriptQuestion
     const question: PendingQuestion | null = questionBase
-      ? { ...questionBase, answerable: questionBase.answerable && !this.config.readOnly }
+      ? {
+          ...questionBase,
+          answerable: questionBase.answerable && !this.config.readOnly,
+          // A question the hook never received (daemon restart, slow daemon)
+          // still sits in the session's terminal. If that terminal is a live
+          // tmux pane, the board can type the answer there.
+          paneAnswerable:
+            !questionBase.answerable &&
+            !this.config.readOnly &&
+            Boolean(live?.tmux) &&
+            Boolean(paneTarget(live?.tmux ?? null)),
+        }
       : null
 
     const jobWorking = job?.state === 'working' && !job?.exited && !job?.blocked && !job.idle

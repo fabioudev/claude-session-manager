@@ -627,6 +627,7 @@ export function pendingQuestionFromState(
     createdAt: latest.at,
     expiresAt: null,
     answerable: status === 'answerable',
+    paneAnswerable: false,
     source: 'transcript',
   }
 }

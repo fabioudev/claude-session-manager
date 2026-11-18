@@ -94,6 +94,14 @@ export async function sendEnter(pane: string): Promise<boolean> {
   return run(['send-keys', '-t', pane, '--', 'Enter'])
 }
 
+/** A named key (arrow, Tab, Escape) in a pane, for dialogs that need navigation. */
+export async function sendKey(
+  pane: string,
+  key: 'Down' | 'Up' | 'Tab' | 'Space' | 'Escape',
+): Promise<boolean> {
+  return run(['send-keys', '-t', pane, '--', key])
+}
+
 /** `=` makes tmux match the name exactly instead of as a prefix. */
 function exactTarget(name: string): string {
   return `=${name}`

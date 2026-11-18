@@ -117,6 +117,7 @@ export class QuestionBroker {
       createdAt,
       expiresAt: createdAt + timeoutSeconds * 1000,
       answerable: true,
+      paneAnswerable: false,
       source: 'hook',
     }
 

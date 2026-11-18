@@ -318,7 +318,7 @@ export function EpicPage() {
                 </span>
                 <p>{ownerQuestion.prompts[0]?.question ?? 'Der Epic-Commander hat eine Frage.'}</p>
               </div>
-              {ownerQuestion.answerable && !readOnly ? (
+              {(ownerQuestion.answerable || ownerQuestion.paneAnswerable) && !readOnly ? (
                 <button
                   className="btn btn-primary"
                   type="button"

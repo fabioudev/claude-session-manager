@@ -20,7 +20,7 @@ export function QuestionCard({ question }: { question: PendingQuestion }) {
   const first = question.prompts[0]
   const expired = question.expiresAt !== null && question.expiresAt <= now
   const writable = config !== null && !config.readOnly && config.questionMode !== 'terminal'
-  const answerable = question.answerable && writable && !expired
+  const answerable = (question.answerable || question.paneAnswerable) && writable && !expired
   const optionPreview = first?.options
     .map((option) => option.label)
     .slice(0, 4)

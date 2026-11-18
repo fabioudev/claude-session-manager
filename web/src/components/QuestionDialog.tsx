@@ -53,7 +53,7 @@ function QuestionSheet({ question, onClose }: { question: PendingQuestion; onClo
   const session = sessions.find((candidate) => candidate.id === question.sessionId)
   const expired = question.expiresAt !== null && question.expiresAt <= now
   const writable = config !== null && !config.readOnly && config.questionMode !== 'terminal'
-  const answerable = question.answerable && writable && !expired
+  const answerable = (question.answerable || question.paneAnswerable) && writable && !expired
   const complete = question.prompts.every((_prompt, index) => {
     const draft = draftFor(drafts, index)
     return draft.labels.length > 0 || draft.other.trim().length > 0

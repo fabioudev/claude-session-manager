@@ -32,6 +32,13 @@ export interface PendingQuestion {
   expiresAt: number | null
   /** True when a hook is currently holding the terminal prompt open for a web answer. */
   answerable: boolean
+  /**
+   * True when the question sits in a live terminal and the board can answer it
+   * by typing the chosen options into that pane. Claude Code does not always
+   * hand every question to the hook (a restart or a slow daemon drops one), so
+   * this keeps such a dialog answerable instead of leaving it stranded.
+   */
+  paneAnswerable: boolean
   source: 'hook' | 'transcript'
 }
 

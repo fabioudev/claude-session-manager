@@ -404,7 +404,9 @@ export async function buildServer(
     if (!body || !Array.isArray(body.answers)) {
       return sendError(reply, 400, 'bad_request', 'Expected { answers: [...] }.')
     }
-    const result = manager.answerQuestion(id, { answers: body.answers } as QuestionAnswerInput)
+    const result = await manager.answerQuestion(id, {
+      answers: body.answers,
+    } as QuestionAnswerInput)
     if (!result.ok)
       return sendError(reply, 409, 'question_closed', result.error ?? 'Question closed.')
     return { ok: true }
