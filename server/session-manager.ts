@@ -124,6 +124,16 @@ const RESTART_START_TIMEOUT_MS = 10_000
 const RESTART_STABLE_MS = 1_500
 const RESUME_NAME_ATTEMPTS = 20
 const RESUME_OUTPUT_LINES = 40
+/**
+ * Claude Code's "Entering worktree … 1. Yes" confirmation is a security prompt
+ * that a PreToolUse hook does not reliably pre-empt, and a background job has
+ * no terminal to answer it. The manager opens one itself for exactly that
+ * dialog, so nobody has to attach by hand.
+ */
+const WORKTREE_APPROVE_TICK_MS = 20_000
+const WORKTREE_APPROVE_MIN_BLOCK_MS = 60_000
+const WORKTREE_APPROVE_COOLDOWN_MS = 10 * MINUTE
+const WORKTREE_APPROVE_ATTACH_TIMEOUT_MS = 6_000
 /** Long enough for Claude Code to paint either its trust dialog or its input box. */
 const TRUST_PROMPT_TIMEOUT_MS = 8_000
 const MAX_PROMPT_LENGTH = 20000
@@ -342,7 +352,9 @@ export class SessionManager {
   private versionTimer: NodeJS.Timeout | null = null
   private autoRestartTimer: NodeJS.Timeout | null = null
   private dialogTimer: NodeJS.Timeout | null = null
+  private worktreeTimer: NodeJS.Timeout | null = null
   private readonly dismissedNotices = new Map<string, number>()
+  private readonly approvedWorktrees = new Map<string, number>()
   private recomputing = false
   private recomputeAgain = false
   private closed = false
@@ -409,6 +421,11 @@ export class SessionManager {
     this.autoRestartTimer.unref?.()
     this.dialogTimer = setInterval(() => void this.dismissNoticesTick(), 15_000)
     this.dialogTimer.unref?.()
+    this.worktreeTimer = setInterval(
+      () => void this.approveWorktreePromptsTick(),
+      WORKTREE_APPROVE_TICK_MS,
+    )
+    this.worktreeTimer.unref?.()
     void this.refreshInstalledVersions()
   }
 
@@ -1982,6 +1999,65 @@ export class SessionManager {
     }
   }
 
+  /**
+   * A background job cannot answer Claude Code's "Entering worktree … 1. Yes"
+   * confirmation: it has no terminal, and the PreToolUse allow does not reliably
+   * suppress this particular security prompt. Rather than leave the worker
+   * blocked until a human attaches, the manager opens a terminal of its own,
+   * reads the screen and only presses Enter when that exact prompt with "1. Yes"
+   * selected is visible. Every other dialog is left untouched.
+   */
+  private async approveWorktreePromptsTick(): Promise<void> {
+    if (this.closed) return
+    if (this.config.readOnly || !restartSupported()) return
+    const at = now()
+    for (const job of this.registry.getSnapshot().jobs) {
+      const sessionId = job.sessionId
+      if (!sessionId) continue
+      if (!job.needs || !/entering worktree/i.test(job.needs)) continue
+      if (at - (job.updatedAt ?? 0) < WORKTREE_APPROVE_MIN_BLOCK_MS) continue
+      if ((this.approvedWorktrees.get(sessionId) ?? 0) > at - WORKTREE_APPROVE_COOLDOWN_MS) {
+        continue
+      }
+      const session = this.summaries.get(sessionId)
+      if (!session?.live || session.kind !== 'background') continue
+      this.approvedWorktrees.set(sessionId, at)
+      void this.approveWorktreePrompt(session)
+    }
+  }
+
+  private async approveWorktreePrompt(session: SessionSummary): Promise<void> {
+    const probe = `csm-approve-${session.shortId}`
+    await killSession(probe).catch(() => undefined)
+    const pane = await newSession(probe, null)
+    if (!pane) return
+    try {
+      // `claude attach` is a viewer: killing this pane only detaches it.
+      if (!(await sendText(pane, `${this.claudeBin} attach ${session.shortId}`))) return
+      if (!(await sendEnter(pane))) return
+      const visible = await waitFor(async () => {
+        const text = await capturePane(pane, 40)
+        if (!text) return false
+        return /Entering worktree/i.test(text) && /❯\s*1\.\s*Yes/.test(text)
+      }, WORKTREE_APPROVE_ATTACH_TIMEOUT_MS)
+      if (!visible) return
+      if (!(await sendEnter(pane))) return
+      await new Promise((resolve) => setTimeout(resolve, 800))
+      this.store.recordActivities(session.id, [
+        {
+          id: `worktree:${randomUUID()}`,
+          at: now(),
+          kind: 'status',
+          title: 'Approved the worktree prompt automatically',
+          detail: 'The session was at Claude Code’s worktree confirmation; Enter chose “1. Yes”.',
+        },
+      ])
+      this.scheduleRecompute(0)
+    } finally {
+      await killSession(probe).catch(() => undefined)
+    }
+  }
+
   private refreshInstalledVersions(): Promise<void> {
     if (this.versionRefresh) return this.versionRefresh
     const task = (async () => {
@@ -2027,6 +2103,10 @@ export class SessionManager {
     if (this.dialogTimer) {
       clearInterval(this.dialogTimer)
       this.dialogTimer = null
+    }
+    if (this.worktreeTimer) {
+      clearInterval(this.worktreeTimer)
+      this.worktreeTimer = null
     }
     for (const question of this.broker.pendingQuestions()) {
       this.broker.cancelForSession(question.sessionId, 'terminal')
