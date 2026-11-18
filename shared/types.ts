@@ -229,6 +229,8 @@ export interface SessionSummary {
   unreadMessages: number
   overlapCount: number
   pinned: boolean
+  /** Reserved for its own work: the board never assigns tasks to it. */
+  reserved: boolean
   archived: boolean
   timeline: SessionTimeline
   messageCount: number
@@ -370,6 +372,7 @@ export interface SettingsPatch {
 export interface SessionPatch {
   title?: string | null
   pinned?: boolean
+  reserved?: boolean
   archived?: boolean
 }
 

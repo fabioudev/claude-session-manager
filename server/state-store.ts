@@ -44,6 +44,7 @@ export interface SessionMeta {
   id: string
   customTitle: string | null
   pinned: boolean
+  reserved: boolean
   archived: boolean
   firstSeenAt: number
   lastSeenAt: number
@@ -224,6 +225,7 @@ function sanitizeSession(id: string, value: unknown): SessionMeta | null {
     id,
     customTitle: typeof meta.customTitle === 'string' ? meta.customTitle : null,
     pinned: asBoolean(meta.pinned, false),
+    reserved: asBoolean(meta.reserved, false),
     archived: asBoolean(meta.archived, false),
     firstSeenAt: asNumber(meta.firstSeenAt, lastActivityAt),
     lastSeenAt: asNumber(meta.lastSeenAt, lastActivityAt),
@@ -434,6 +436,7 @@ export class StateStore {
         id,
         customTitle: null,
         pinned: false,
+        reserved: false,
         archived: false,
         firstSeenAt: at,
         lastSeenAt: at,
@@ -468,7 +471,7 @@ export class StateStore {
 
   patchSession(
     id: string,
-    patch: { title?: string | null; pinned?: boolean; archived?: boolean },
+    patch: { title?: string | null; pinned?: boolean; reserved?: boolean; archived?: boolean },
   ): SessionMeta {
     const meta = this.ensureSession(id)
     if (patch.title !== undefined) {
@@ -476,6 +479,7 @@ export class StateStore {
       meta.customTitle = title ? title.slice(0, 200) : null
     }
     if (typeof patch.pinned === 'boolean') meta.pinned = patch.pinned
+    if (typeof patch.reserved === 'boolean') meta.reserved = patch.reserved
     if (typeof patch.archived === 'boolean') meta.archived = patch.archived
     this.touch()
     return meta

@@ -387,6 +387,7 @@ export async function buildServer(
       patch.title = body.title as string | null
     }
     if (typeof body.pinned === 'boolean') patch.pinned = body.pinned
+    if (typeof body.reserved === 'boolean') patch.reserved = body.reserved
     if (typeof body.archived === 'boolean') patch.archived = body.archived
     if (!Object.keys(patch).length) {
       return sendError(reply, 400, 'bad_request', 'Nothing to update.')

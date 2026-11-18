@@ -901,3 +901,14 @@ describe('human notifications', () => {
     expect(ids).not.toContain(gone.id)
   })
 })
+
+describe('reserved sessions', () => {
+  it('refuses to hand a delegated task to a session marked reserved', async () => {
+    const { service, sessions } = await harness()
+    const worker = sessions.get('worker')
+    if (!worker) throw new Error('worker fixture missing')
+    sessions.set('worker', { ...worker, reserved: true })
+
+    await expect(assignedTask(service)).rejects.toMatchObject({ code: 'session_reserved' })
+  })
+})

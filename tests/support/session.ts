@@ -44,6 +44,7 @@ export function makeSession(overrides: Partial<SessionSummary> = {}): SessionSum
     unreadMessages: 0,
     overlapCount: 0,
     pinned: false,
+    reserved: false,
     archived: false,
     timeline: { start: 0, end: 0, bucketMs: 60_000, counts: [], waiting: [] },
     messageCount: 0,

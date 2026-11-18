@@ -587,7 +587,9 @@ export class OrchestrationService {
         `The command center holds at most ${MAX_EPICS} epics.`,
       )
     }
-    const owner = input.ownerSessionId ? this.liveSession(input.ownerSessionId, 'Epic owner') : null
+    const owner = input.ownerSessionId
+      ? this.assignableSession(input.ownerSessionId, 'Epic owner')
+      : null
     const at = this.now()
     const epic: Epic = {
       id: `epic_${randomUUID()}`,
@@ -661,7 +663,7 @@ export class OrchestrationService {
       ownerSessionId:
         patch.ownerSessionId !== undefined
           ? patch.ownerSessionId
-            ? this.liveSession(patch.ownerSessionId, 'Epic owner').id
+            ? this.assignableSession(patch.ownerSessionId, 'Epic owner').id
             : null
           : epic.ownerSessionId,
       messages: epic.messages.slice(),
@@ -985,7 +987,7 @@ export class OrchestrationService {
       }
     }
     const assignee = input.assigneeSessionId
-      ? this.liveSession(input.assigneeSessionId, 'Assignee')
+      ? this.assignableSession(input.assigneeSessionId, 'Assignee')
       : null
     const at = this.now()
     const task: DelegatedTask = {
@@ -1151,7 +1153,7 @@ export class OrchestrationService {
     const assignee =
       patch.assigneeSessionId !== undefined
         ? patch.assigneeSessionId
-          ? this.liveSession(patch.assigneeSessionId, 'Assignee')
+          ? this.assignableSession(patch.assigneeSessionId, 'Assignee')
           : null
         : undefined
     const note = optionalText(patch.note, 'Progress note', 3000)
@@ -1470,7 +1472,7 @@ export class OrchestrationService {
         'Reopen the task before dispatching it again.',
       )
     }
-    const session = this.liveSession(task.assigneeSessionId, 'Assignee')
+    const session = this.assignableSession(task.assigneeSessionId, 'Assignee')
     const result = await this.options.sendPrompt(session.id, this.taskPrompt(task, session))
     task.lastDispatch = result
     task.updatedAt = this.now()
@@ -1745,7 +1747,7 @@ export class OrchestrationService {
     if (commander) {
       lines.push(
         'You are the designated commander: dispatch and verify, never do the work yourself. Use get_command_center before planning, list_sessions to choose workers, create_task to delegate (auto-dispatch), spawn_task to start a new session when no live worker can take the work, update_task to review/finish, share_knowledge for durable facts, and request_decision when the human must answer — always through these tools, never curl. Delegate in the same turn instead of only planning; do not read repository code, grep, build, test, edit files or spawn subagents — delegate a read-only discovery task instead. Then post one short report_status round-up so the human sees what is running where. Keep monitoring and report milestones, blockers and completions with report_status. A new goal may arrive for any project at any time: accept it in parallel without dropping current work. Workers finish in review; only mark done after verification.',
-        'Every large goal belongs to an epic. When the human hands you a new big task, attach it to the fitting existing epic or open one with create_epic, then hand it to a dedicated epic commander with spawn_epic_commander so its details do not crowd your context. The epic status_line is one or two short sentences and is what the human reads on the overview; keep it current with update_epic. Human questions in an epic thread are answered there with post_epic_message, not in this chat.',
+        'Every large goal belongs to an epic. When the human hands you a new big task, attach it to the fitting existing epic or open one with create_epic, then hand it to a dedicated epic commander with spawn_epic_commander so its details do not crowd your context. The epic status_line is one or two short sentences and is what the human reads on the overview; keep it current with update_epic. Human questions in an epic thread are answered there with post_epic_message, not in this chat. Sessions marked RESERVED in list_sessions never take delegated tasks or epics.',
       )
     } else if (ownedEpics.length) {
       lines.push(
@@ -1891,6 +1893,23 @@ export class OrchestrationService {
   private session(id: string): SessionSummary {
     const session = this.options.getSession(id)
     if (!session) throw new OrchestrationError(404, 'not_found', 'Unknown session.')
+    return session
+  }
+
+  /**
+   * Assignment target. A session marked `reserved` works only on its own job
+   * (the manager's developer session, for example) and must never receive a
+   * delegated task or an epic.
+   */
+  private assignableSession(id: string, label: string): SessionSummary {
+    const session = this.liveSession(id, label)
+    if (session.reserved) {
+      throw new OrchestrationError(
+        409,
+        'session_reserved',
+        `${session.name ?? shortId(id)} is reserved for its own work and takes no delegated tasks.`,
+      )
+    }
     return session
   }
 

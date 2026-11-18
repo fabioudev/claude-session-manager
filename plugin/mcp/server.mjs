@@ -326,6 +326,7 @@ function formatSession(session, self) {
     `in ${session.repoName || session.projectName}`,
   ]
   if (session.gitBranch) bits.push(`on ${session.gitBranch}`)
+  if (session.reserved) bits.push('RESERVED — do not assign work')
   const lines = [`- ${bits.join(' · ')}`]
   if (session.task) lines.push(`  task: ${oneLine(session.task, 220)}`)
   const detail = session.question

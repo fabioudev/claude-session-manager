@@ -2651,6 +2651,7 @@ export class SessionManager {
         (overlap) => overlap.sessionIds.includes(id) || overlap.claimedBy.includes(id),
       ).length,
       pinned: meta?.pinned ?? false,
+      reserved: meta?.reserved ?? false,
       archived: meta?.archived ?? false,
       timeline: buildTimeline(this.mergedActivities(id, view), question, notification, job, at),
       messageCount: view?.messageCount ?? 0,
