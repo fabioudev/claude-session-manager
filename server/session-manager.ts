@@ -1757,6 +1757,7 @@ export class SessionManager {
     }, RESTART_SHELL_TIMEOUT_MS)
     if (exitDialog) {
       await this.cancelExitDialog(pane)
+      this.recordRestartCancelled(id, auto, 'exit dialog')
       return {
         ok: false,
         error:
@@ -1764,6 +1765,18 @@ export class SessionManager {
       }
     }
     if (!returned) {
+      // The dialog can paint just after the wait timed out. Answer it now, so a
+      // restart that could not finish never leaves the session at a prompt.
+      const late = await capturePane(pane, 24)
+      if (late && looksLikeTerminalDialog(late)) {
+        await this.cancelExitDialog(pane)
+        this.recordRestartCancelled(id, auto, 'late exit dialog')
+        return {
+          ok: false,
+          error:
+            'The session stayed at a dialog after the restart attempt; the dialog was cancelled and nothing was relaunched.',
+        }
+      }
       return {
         ok: false,
         error:
@@ -1835,6 +1848,20 @@ export class SessionManager {
     await new Promise((resolve) => setTimeout(resolve, 400))
     const text = await capturePane(pane, 20)
     if (text && looksLikeTerminalDialog(text)) await sendEnter(pane)
+  }
+
+  /** Leaves a trace on the board when a restart stopped at a dialog. */
+  private recordRestartCancelled(id: string, auto: boolean, reason: string): void {
+    this.store.recordActivities(id, [
+      {
+        id: `restart-cancelled:${randomUUID()}`,
+        at: now(),
+        kind: 'status',
+        title: auto ? 'Automatic restart cancelled' : 'Restart cancelled',
+        detail: `Nothing was relaunched (${reason}).`,
+      },
+    ])
+    this.scheduleRecompute(0)
   }
 
   /**
